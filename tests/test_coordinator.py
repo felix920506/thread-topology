@@ -1,11 +1,8 @@
 """Tests for Thread Topology coordinator."""
 from __future__ import annotations
 
-import importlib
-import os
 import sys
-import tempfile
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 import pytest
 
 # Mock homeassistant modules so coordinator can be imported without HA installed
@@ -20,161 +17,131 @@ sys.modules.setdefault("homeassistant.helpers.update_coordinator", MagicMock())
 from custom_components.thread_topology.coordinator import (
     _normalize_address,
     KNOWN_BORDER_ROUTER_OUIS,
+    ThreadTopologyCoordinator,
 )
 
 
-class TestTopologyProcessing:
-    """Test cases for topology processing logic."""
-
-    def test_network_name_extraction(self, mock_otbr_node_response):
-        """Test network name is extracted from node response."""
-        network_name = mock_otbr_node_response.get("NetworkName", "Unknown")
-
-        assert network_name == "MyHome1038137341"
-
-    def test_state_extraction(self, mock_otbr_node_response):
-        """Test state is extracted from node response."""
-        state = mock_otbr_node_response.get("State", "unknown")
-
-        assert state == "leader"
-
-    def test_router_count_extraction(self, mock_otbr_node_response):
-        """Test router count is extracted from node response."""
-        router_count = mock_otbr_node_response.get("NumOfRouter", 0)
-
-        assert router_count == 3
-
-    def test_leader_address_extraction(self, mock_otbr_node_response):
-        """Test leader extended address is extracted."""
-        leader_address = mock_otbr_node_response.get("ExtAddress", "")
-
-        assert leader_address == "1EA5312CFB153F0B"
-
-    def test_diagnostics_node_count(self, mock_otbr_diagnostics_response):
-        """Test diagnostic nodes are counted correctly."""
-        assert len(mock_otbr_diagnostics_response) == 3
-
-    def test_diagnostics_has_leader(self, mock_otbr_diagnostics_response, mock_otbr_node_response):
-        """Test diagnostics contains the leader node."""
-        leader_ext = mock_otbr_node_response["ExtAddress"]
-        ext_addresses = [d["ExtAddress"] for d in mock_otbr_diagnostics_response]
-
-        assert leader_ext in ext_addresses
+def _build_coordinator() -> ThreadTopologyCoordinator:
+    """Create a coordinator instance with HA dependencies mocked out."""
+    return ThreadTopologyCoordinator(MagicMock(), "http://localhost:8081")
 
 
-class TestRoleIdentification:
-    """Test cases for role identification logic."""
-
-    def test_leader_identification(self, mock_otbr_diagnostics_response, mock_otbr_node_response):
-        """Test leader role is correctly identified."""
-        leader_ext = mock_otbr_node_response["ExtAddress"]
-
-        for diag in mock_otbr_diagnostics_response:
-            if diag["ExtAddress"] == leader_ext:
-                is_leader = True
-                break
-        else:
-            is_leader = False
-
-        assert is_leader
-
-    def test_router_identification(self, mock_otbr_diagnostics_response):
-        """Test router role is identified from Mode.DeviceType."""
-        for diag in mock_otbr_diagnostics_response:
-            mode = diag.get("Mode", {})
-            is_router = mode.get("DeviceType", 0) == 1
-
-            # All nodes in mock data are routers
-            assert is_router
+@pytest.fixture
+def topology(
+    mock_otbr_node_response,
+    mock_otbr_devices_response,
+    mock_diagnostics_by_addr,
+    mock_matter_devices,
+):
+    """Run the real _process_topology over the JSON:API fixtures."""
+    coordinator = _build_coordinator()
+    node_attrs = ThreadTopologyCoordinator._resource_attributes(mock_otbr_node_response)
+    devices = ThreadTopologyCoordinator._resource_list(mock_otbr_devices_response)
+    return coordinator._process_topology(
+        node_attrs, devices, mock_diagnostics_by_addr, mock_matter_devices, []
+    )
 
 
-class TestLinkQualityCalculation:
-    """Test cases for link quality calculation."""
+class TestResourceHelpers:
+    """Test cases for JSON:API response helpers."""
 
-    def test_link_quality_3_is_best(self, mock_otbr_diagnostics_response):
-        """Test link quality 3 is identified as best."""
-        for diag in mock_otbr_diagnostics_response:
-            connectivity = diag.get("Connectivity", {})
-            lq3 = connectivity.get("LinkQuality3", 0)
-            lq2 = connectivity.get("LinkQuality2", 0)
-            lq1 = connectivity.get("LinkQuality1", 0)
+    def test_resource_attributes_single(self, mock_otbr_node_response):
+        attrs = ThreadTopologyCoordinator._resource_attributes(mock_otbr_node_response)
+        assert attrs["networkName"] == "MyHome1038137341"
+        assert attrs["extAddress"] == "1EA5312CFB153F0B"
 
-            if lq3 > 0:
-                link_quality = 3
-            elif lq2 > 0:
-                link_quality = 2
-            elif lq1 > 0:
-                link_quality = 1
-            else:
-                link_quality = 0
+    def test_resource_attributes_raw_keeps_relationships(self):
+        payload = {
+            "data": {
+                "id": "abc",
+                "attributes": {"status": "completed"},
+                "relationships": {"diagnostics": {"data": {"id": "diag-1"}}},
+            }
+        }
+        raw = ThreadTopologyCoordinator._resource_attributes(payload, raw=True)
+        assert raw["id"] == "abc"
+        assert raw["relationships"]["diagnostics"]["data"]["id"] == "diag-1"
 
-            # All mock nodes have LQ3 = 1
-            assert link_quality == 3
+    def test_resource_list_collection(self, mock_otbr_devices_response):
+        items = ThreadTopologyCoordinator._resource_list(mock_otbr_devices_response)
+        assert len(items) == 4
+        assert items[0]["id"] == "1EA5312CFB153F0B"
 
-    def test_leader_cost_extraction(self, mock_otbr_diagnostics_response):
-        """Test leader cost is extracted from connectivity."""
-        # Leader should have cost 0, routers have cost >= 1
-        for diag in mock_otbr_diagnostics_response:
-            connectivity = diag.get("Connectivity", {})
-            leader_cost = connectivity.get("LeaderCost", 0)
+    def test_relationship_id(self):
+        resource = {
+            "id": "action-1",
+            "relationships": {"diagnostics": {"data": {"type": "x", "id": "diag-42"}}},
+        }
+        assert ThreadTopologyCoordinator._relationship_id(resource, "diagnostics") == "diag-42"
 
-            assert leader_cost >= 0
+    def test_relationship_id_missing(self):
+        assert ThreadTopologyCoordinator._relationship_id({}, "diagnostics") is None
 
 
-class TestChildTableProcessing:
-    """Test cases for child table processing."""
+class TestProcessTopology:
+    """Test cases for the end-to-end topology processing."""
 
-    def test_child_count(self, mock_otbr_diagnostics_response):
-        """Test children are counted correctly."""
-        total_children = 0
-        for diag in mock_otbr_diagnostics_response:
-            children = diag.get("ChildTable", [])
-            total_children += len(children)
+    def test_network_metadata(self, topology):
+        assert topology["network_name"] == "MyHome1038137341"
+        assert topology["state"] == "leader"
+        assert topology["leader_address"] == "1EA5312CFB153F0B"
+        assert topology["router_count"] == 3
 
-        # Mock has: 1 + 1 + 2 = 4 children
-        assert total_children == 4
+    def test_only_routers_become_nodes(self, topology):
+        """The child device in the collection must not be a standalone node."""
+        assert len(topology["nodes"]) == 3
+        assert "DEADBEEF00000001" not in topology["nodes"]
 
-    def test_sleepy_device_identification(self, mock_otbr_diagnostics_response):
-        """Test sleepy end devices are identified."""
-        sleepy_count = 0
-        active_count = 0
+    def test_total_devices(self, topology):
+        # 3 routers + 4 children = 7
+        assert topology["total_devices"] == 7
 
-        for diag in mock_otbr_diagnostics_response:
-            for child in diag.get("ChildTable", []):
-                child_mode = child.get("Mode", {})
-                rx_on_idle = child_mode.get("RxOnWhenIdle", 1)
+    def test_leader_role_identified(self, topology):
+        leader = topology["nodes"]["1EA5312CFB153F0B"]
+        assert leader["role"] == "leader"
+        assert leader["leader_cost"] == 0
 
-                if rx_on_idle == 0:
-                    sleepy_count += 1
-                else:
-                    active_count += 1
+    def test_router_role_identified(self, topology):
+        assert topology["nodes"]["96308C2577D6EA17"]["role"] == "router"
+        assert topology["nodes"]["A4B3C2D1E0F09876"]["role"] == "router"
 
-        # Most mock children are sleepy (RxOnWhenIdle=0)
-        assert sleepy_count >= 2
+    def test_link_quality_from_connectivity(self, topology):
+        for node in topology["nodes"].values():
+            assert node["link_quality"] == 3
+
+    def test_child_counts(self, topology):
+        counts = {addr: node["child_count"] for addr, node in topology["nodes"].items()}
+        assert counts["1EA5312CFB153F0B"] == 1
+        assert counts["96308C2577D6EA17"] == 1
+        assert counts["A4B3C2D1E0F09876"] == 2
+
+    def test_sleepy_vs_active_children(self, topology):
+        node = topology["nodes"]["A4B3C2D1E0F09876"]
+        types = sorted(child["type"] for child in node["children"])
+        # rxOnWhenIdle False -> sleepy, True -> active
+        assert types == ["active", "sleepy"]
+
+    def test_connections_from_route64(self, topology):
+        leader = topology["nodes"]["1EA5312CFB153F0B"]
+        assert leader["connections"]
+        assert leader["connections"][0]["router_id"] == 2
+        assert leader["connections"][0]["cost"] == 1
+
+    def test_matter_split(self, topology):
+        assert len(topology["matter_devices"]["thread"]) == 3
+        assert len(topology["matter_devices"]["wifi"]) == 2
+        assert topology["matter_devices"]["total"] == 5
+
+    def test_svg_generation(self, topology):
+        coordinator = _build_coordinator()
+        svg = coordinator.generate_svg(topology)
+        assert svg.startswith("<svg")
+        assert svg.rstrip().endswith("</svg>")
+        assert "MyHome1038137341" in svg
 
 
 class TestBorderRouterIdentification:
     """Test cases for border router identification."""
-
-    def test_skyconnect_leader_identification(self):
-        """Test SkyConnect is identified as leader."""
-        def identify_router(ext_address: str, is_leader: bool, router_index: int) -> dict:
-            if is_leader:
-                return {
-                    "name": "SkyConnect (OTBR)",
-                    "manufacturer": "Nabu Casa",
-                    "type": "border_router",
-                }
-            return {
-                "name": "Unknown Router",
-                "manufacturer": "Unknown",
-                "type": "border_router",
-            }
-
-        result = identify_router("ANYADDRESS", is_leader=True, router_index=0)
-
-        assert result["name"] == "SkyConnect (OTBR)"
-        assert result["manufacturer"] == "Nabu Casa"
 
     def test_eero_pattern_matching(self):
         """Test Eero router identification by pattern."""
@@ -203,7 +170,6 @@ class TestBorderRouterIdentification:
             "50:EC:50": {"name": "Eero Pro", "manufacturer": "Amazon/Eero"},
         }
 
-        # Test Apple OUI
         ext = "286D970123456789"
         oui = f"{ext[0:2]}:{ext[2:4]}:{ext[4:6]}"
 
@@ -215,84 +181,35 @@ class TestMatterDeviceMatching:
     """Test cases for Matter device matching."""
 
     def test_thread_device_filter(self, mock_matter_devices):
-        """Test filtering Thread-only Matter devices."""
         thread_devices = [d for d in mock_matter_devices if d["transport"] == "thread"]
-
         assert len(thread_devices) == 3
 
     def test_wifi_device_filter(self, mock_matter_devices):
-        """Test filtering WiFi-only Matter devices."""
         wifi_devices = [d for d in mock_matter_devices if d["transport"] == "wifi"]
-
         assert len(wifi_devices) == 2
 
     def test_device_name_access(self, mock_matter_devices):
-        """Test accessing device names."""
         names = [d["name"] for d in mock_matter_devices]
-
         assert "Meross MS605" in names
         assert "Nuki Smart Lock" in names
-
-
-class TestTopologyResult:
-    """Test cases for topology result structure."""
-
-    def test_result_structure(self, mock_otbr_node_response, mock_otbr_diagnostics_response, mock_matter_devices):
-        """Test the expected topology result structure."""
-        # Simulate processing
-        result = {
-            "network_name": mock_otbr_node_response["NetworkName"],
-            "state": mock_otbr_node_response["State"],
-            "leader_address": mock_otbr_node_response["ExtAddress"],
-            "router_count": mock_otbr_node_response["NumOfRouter"],
-            "nodes": {},
-            "total_devices": 0,
-            "matter_devices": {
-                "thread": [d for d in mock_matter_devices if d["transport"] == "thread"],
-                "wifi": [d for d in mock_matter_devices if d["transport"] == "wifi"],
-                "total": len(mock_matter_devices),
-            },
-        }
-
-        # Add nodes
-        for diag in mock_otbr_diagnostics_response:
-            ext = diag["ExtAddress"]
-            result["nodes"][ext] = {
-                "ext_address": ext,
-                "rloc16": diag["Rloc16"],
-                "children": diag.get("ChildTable", []),
-                "child_count": len(diag.get("ChildTable", [])),
-            }
-            result["total_devices"] += 1 + len(diag.get("ChildTable", []))
-
-        assert result["network_name"] == "MyHome1038137341"
-        assert len(result["nodes"]) == 3
-        assert result["total_devices"] == 7  # 3 routers + 4 children
-        assert len(result["matter_devices"]["thread"]) == 3
-        assert len(result["matter_devices"]["wifi"]) == 2
 
 
 class TestNormalizeAddress:
     """Test cases for address normalization."""
 
     def test_strips_colons(self):
-        """Test colons are stripped from address."""
         assert _normalize_address("AA:BA:D1:1C:1D:3A:F2:7F") == "AABAD11C1D3AF27F"
 
     def test_strips_dashes(self):
-        """Test dashes are stripped from address."""
         assert _normalize_address("AA-BA-D1") == "AABAD1"
 
     def test_uppercases(self):
-        """Test address is uppercased."""
         assert _normalize_address("aabad1") == "AABAD1"
 
     def test_strips_spaces(self):
-        """Test spaces are stripped."""
         assert _normalize_address("AA BA D1") == "AABAD1"
 
     def test_already_normalized(self):
-        """Test already normalized address passes through."""
         assert _normalize_address("AABAD11C1D3AF27F") == "AABAD11C1D3AF27F"
 
 
@@ -300,12 +217,10 @@ class TestCustomRouterMatching:
     """Test cases for custom router YAML matching."""
 
     def test_exact_full_address_match(self):
-        """Test matching by exact full extended address."""
         custom_routers = [
             {"address": "AABAD11C1D3AF27F", "name": "SMlight", "manufacturer": "SMlight", "icon": "chip"}
         ]
-        ext = "AABAD11C1D3AF27F"
-        ext_normalized = _normalize_address(ext)
+        ext_normalized = _normalize_address("AABAD11C1D3AF27F")
 
         matched = None
         for custom in custom_routers:
@@ -317,7 +232,6 @@ class TestCustomRouterMatching:
         assert matched["name"] == "SMlight"
 
     def test_oui_prefix_match(self):
-        """Test matching by OUI prefix (first 6 hex chars)."""
         custom_routers = [
             {"address": "AABAD1", "name": "SMlight", "manufacturer": "SMlight", "icon": "chip"}
         ]
@@ -334,7 +248,6 @@ class TestCustomRouterMatching:
         assert matched["name"] == "SMlight"
 
     def test_substring_pattern_match(self):
-        """Test matching by substring pattern in address."""
         custom_routers = [
             {"address": "121BEC66", "name": "ESP32-H2", "manufacturer": "Espressif", "icon": "chip"}
         ]
@@ -350,24 +263,7 @@ class TestCustomRouterMatching:
         assert matched is not None
         assert matched["name"] == "ESP32-H2"
 
-    def test_address_with_colons_matches(self):
-        """Test that address with colons in YAML still matches."""
-        custom_routers = [
-            {"address": _normalize_address("AA:BA:D1"), "name": "SMlight", "manufacturer": "SMlight", "icon": "chip"}
-        ]
-        ext_normalized = "AABAD11C1D3AF27F"
-
-        matched = None
-        for custom in custom_routers:
-            custom_addr = custom["address"]
-            if len(custom_addr) == 6 and ext_normalized[:6] == custom_addr:
-                matched = custom
-                break
-
-        assert matched is not None
-
     def test_no_match_returns_none(self):
-        """Test that non-matching address returns no match."""
         custom_routers = [
             {"address": "FF0011", "name": "Unknown", "manufacturer": "Unknown", "icon": "chip"}
         ]
@@ -386,15 +282,12 @@ class TestCustomRouterMatching:
         assert matched is None
 
     def test_custom_routers_priority_over_builtin(self):
-        """Test custom routers are checked before built-in OUI table."""
-        # Use an address that would match Apple OUI
         ext = "286D970123456789"
         custom_routers = [
             {"address": "286D97", "name": "My Custom Router", "manufacturer": "Custom", "icon": "router"}
         ]
         ext_normalized = _normalize_address(ext)
 
-        # Custom check first
         custom_match = None
         for custom in custom_routers:
             custom_addr = custom["address"]
@@ -405,7 +298,6 @@ class TestCustomRouterMatching:
         assert custom_match is not None
         assert custom_match["name"] == "My Custom Router"
 
-        # Built-in would have said Apple
         oui = f"{ext_normalized[0:2]}:{ext_normalized[2:4]}:{ext_normalized[4:6]}"
         assert oui in KNOWN_BORDER_ROUTER_OUIS
         assert KNOWN_BORDER_ROUTER_OUIS[oui]["manufacturer"] == "Apple"
@@ -415,7 +307,6 @@ class TestURLNormalization:
     """Test cases for URL normalization."""
 
     def test_trailing_slash_removal(self):
-        """Test trailing slash is removed from URL."""
         urls = [
             ("http://localhost:8081/", "http://localhost:8081"),
             ("http://localhost:8081", "http://localhost:8081"),
@@ -427,10 +318,9 @@ class TestURLNormalization:
             assert result == expected
 
     def test_endpoint_construction(self):
-        """Test endpoint URL construction."""
         base_url = "http://localhost:8081"
-        endpoint = "/node"
+        endpoint = "/api/node"
 
         full_url = f"{base_url}{endpoint}"
 
-        assert full_url == "http://localhost:8081/node"
+        assert full_url == "http://localhost:8081/api/node"

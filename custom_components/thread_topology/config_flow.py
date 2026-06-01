@@ -10,7 +10,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_URL
 
-from .const import DEFAULT_OTBR_URL, DOMAIN, ENDPOINT_NODE
+from .const import API_MEDIA_TYPE, DEFAULT_OTBR_URL, DOMAIN, ENDPOINT_NODE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,16 +29,23 @@ class ThreadTopologyConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             otbr_url = user_input.get(CONF_URL, DEFAULT_OTBR_URL)
 
-            # Test connection to OTBR
+            # Test connection to OTBR's new /api/node endpoint
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(
-                        f"{otbr_url}{ENDPOINT_NODE}",
+                        f"{otbr_url.rstrip('/')}{ENDPOINT_NODE}",
+                        headers={"Accept": API_MEDIA_TYPE},
                         timeout=aiohttp.ClientTimeout(total=10),
                     ) as response:
                         if response.status == 200:
-                            data = await response.json()
-                            network_name = data.get("NetworkName", "Thread Network")
+                            payload = await response.json()
+                            # JSON:API: attributes live under data.attributes;
+                            # fall back to a flat payload for older builds.
+                            resource = payload.get("data", payload) if isinstance(payload, dict) else {}
+                            attrs = resource.get("attributes", resource) if isinstance(resource, dict) else {}
+                            network_name = attrs.get("networkName") or attrs.get(
+                                "NetworkName", "Thread Network"
+                            )
 
                             # Check if already configured
                             await self.async_set_unique_id(network_name)

@@ -1,20 +1,21 @@
 # Thread Network Topology for Home Assistant
 
-> ## ⚠️ DEPRECATED / ARCHIVED — do not use
+> ## ✅ Requires a recent OTBR build (new REST API)
 >
-> This integration is **no longer maintained** and has been archived.
+> This integration uses the OpenThread Border Router (OTBR) **REST API**. OTBR reorganized
+> that API: the old `GET /node` and `GET /diagnostics` endpoints are gone. The integration
+> now targets the current JSON:API layout under `/api/*`:
 >
-> **Why it doesn't work:** it relied on the OpenThread Border Router (OTBR) REST API
-> endpoint `GET /diagnostics` to build the mesh topology. Home Assistant's OTBR build
-> (e.g. the Connect ZBT-1) **does not expose any mesh-diagnostics endpoint** (`/diagnostics`
-> returns HTTP 404) and only serves `/node/*`. The REST API also switched its JSON keys
-> from PascalCase to camelCase, so even basic `/node` parsing broke. The data needed to
-> draw a Thread mesh map simply isn't available through the OTBR REST API.
+> - `GET /api/node` — node / leader information (camelCase, under `data.attributes`)
+> - mesh diagnostics are an **asynchronous task queue**: it `POST`s tasks to `/api/actions`
+>   (`updateDeviceCollectionTask`, then `getNetworkDiagnosticTask` per router), polls them to
+>   completion, and reads the results from the `/api/devices` and `/api/diagnostics`
+>   collections.
 >
-> **Use this instead:** the **Open Home Foundation Matter Server** now renders a native
-> Thread mesh topology diagram (Thread tab in its dashboard), built from the standard
-> **Thread Network Diagnostics Cluster** over Matter — the correct data source. That is
-> the supported, Zigbee-map-equivalent way to visualize a Thread network.
+> **You need an OTBR build that exposes these `/api/*` endpoints.** Older builds that only
+> serve the legacy `/node` paths are not supported. If you prefer a fully native option,
+> the **Open Home Foundation Matter Server** also renders a Thread mesh diagram from the
+> Thread Network Diagnostics Cluster over Matter.
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![GitHub Release](https://img.shields.io/github/release/jjtortosa/thread-topology.svg)](https://github.com/jjtortosa/thread-topology/releases)
@@ -31,7 +32,7 @@ A Home Assistant custom integration that visualizes your Thread network topology
 - **Matter Integration**: Links Thread devices with their Matter device names from Home Assistant
 - **Link Quality Indicators**: Visual representation of connection quality (Poor/Fair/Good/Excellent)
 - **WiFi vs Thread**: Separates Matter devices by transport type
-- **Real-time Updates**: Polls OTBR every 60 seconds for network changes
+- **Periodic Updates**: Every 60 seconds it discovers the network and queries per-router diagnostics to rebuild the map
 
 ## What You'll See
 
@@ -122,7 +123,7 @@ For more complete examples including stats tiles and styled cards, see the [exam
 
 ## How It Works
 
-1. **OTBR API**: Fetches network data from `/node` and `/diagnostics` endpoints
+1. **OTBR API**: Reads `/api/node`, triggers network discovery and per-router diagnostics via the `/api/actions` task queue, then reads the `/api/devices` and `/api/diagnostics` collections
 2. **Device Registry**: Queries Home Assistant's device registry for Matter devices
 3. **Smart Matching**: Maps Thread extended addresses to Matter device names
 4. **Transport Detection**: Identifies WiFi vs Thread based on device model/manufacturer
