@@ -101,17 +101,28 @@ Amazon/Eero • Router • LQ: [███] Excellent
 | Docker OTBR | `http://localhost:8081` or `http://<docker-host>:8081` |
 | Standalone OTBR | `http://<otbr-ip>:8081` |
 
-## Sensors Created
+## Entities Created
 
-| Sensor | Description |
+| Entity | Description |
 |--------|-------------|
+| `image.thread_topology` | The topology **diagram** (SVG) — add it straight to a dashboard |
 | `sensor.thread_network` | Network name and overview stats |
-| `sensor.thread_topology_map` | Full topology as markdown text |
+| `sensor.thread_topology_map` | Full topology as markdown text (state = device count) |
 | `sensor.thread_<router_name>` | One sensor per router with link quality |
 
 ## Dashboard Card
 
-Add a Markdown card to display the topology:
+**Easiest:** add the `image.thread_topology` entity directly. In the dashboard
+editor choose **Add Card → By Entity → `image.thread_topology`** (or pick the
+**Picture** card and set `image_entity: image.thread_topology`). It renders the
+live diagram and refreshes automatically:
+
+```yaml
+type: picture
+image_entity: image.thread_topology
+```
+
+**Text alternative:** a Markdown card using the topology text:
 
 ```yaml
 type: markdown
@@ -123,7 +134,7 @@ For more complete examples including stats tiles and styled cards, see the [exam
 
 ## How It Works
 
-1. **OTBR API**: Reads `/api/node`, triggers network discovery and per-router diagnostics via the `/api/actions` task queue, then reads the `/api/devices` and `/api/diagnostics` collections
+1. **OTBR API**: Reads `/api/node`, triggers network discovery and per-router diagnostics (by rloc16) via the `/api/actions` task queue, then reads the `/api/diagnostics` collection
 2. **Device Registry**: Queries Home Assistant's device registry for Matter devices
 3. **Smart Matching**: Maps Thread extended addresses to Matter device names
 4. **Transport Detection**: Identifies WiFi vs Thread based on device model/manufacturer

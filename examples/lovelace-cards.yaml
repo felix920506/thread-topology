@@ -2,7 +2,16 @@
 # Copy any of these configurations to your dashboard
 
 # ===========================================
-# SIMPLE: Just the topology map
+# EASIEST: The topology diagram as a Picture card
+# ===========================================
+# Uses the image entity - just add it, no templates needed.
+# (In the UI editor: Add Card -> By Entity -> image.thread_topology)
+
+type: picture
+image_entity: image.thread_topology
+
+# ===========================================
+# SIMPLE: The topology map as text
 # ===========================================
 # Add this markdown card to display the full topology
 
