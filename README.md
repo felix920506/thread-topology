@@ -105,24 +105,22 @@ Amazon/Eero • Router • LQ: [███] Excellent
 
 | Entity | Description |
 |--------|-------------|
-| `image.thread_topology` | The topology **diagram** (SVG) — add it straight to a dashboard |
+| `sensor.thread_topology_map` | The topology diagram + text (state = device count) |
 | `sensor.thread_network` | Network name and overview stats |
-| `sensor.thread_topology_map` | Full topology as markdown text (state = device count) |
 | `sensor.thread_<router_name>` | One sensor per router with link quality |
 
 ## Dashboard Card
 
-**Easiest:** add the `image.thread_topology` entity directly. In the dashboard
-editor choose **Add Card → By Entity → `image.thread_topology`** (or pick the
-**Picture** card and set `image_entity: image.thread_topology`). It renders the
-live diagram and refreshes automatically:
+The diagram is a [Mermaid](https://mermaid.js.org/) graph, which Home
+Assistant's **Markdown card renders in-browser** and auto-lays-out, so nodes
+never overlap. Just add a Markdown card pointing at the `mermaid` attribute:
 
 ```yaml
-type: picture
-image_entity: image.thread_topology
+type: markdown
+content: "{{ state_attr('sensor.thread_topology_map', 'mermaid') }}"
 ```
 
-**Text alternative:** a Markdown card using the topology text:
+Prefer a plain text tree instead? Use the `topology_text` attribute:
 
 ```yaml
 type: markdown
@@ -130,7 +128,7 @@ title: Thread Network
 content: "{{ state_attr('sensor.thread_topology_map', 'topology_text') }}"
 ```
 
-For more complete examples including stats tiles and styled cards, see the [examples/lovelace-cards.yaml](examples/lovelace-cards.yaml) file.
+For more complete examples including stats tiles, see the [examples/lovelace-cards.yaml](examples/lovelace-cards.yaml) file.
 
 ## How It Works
 

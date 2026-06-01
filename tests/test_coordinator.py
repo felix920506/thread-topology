@@ -164,12 +164,23 @@ class TestProcessTopology:
         assert len(topology["matter_devices"]["wifi"]) == 2
         assert topology["matter_devices"]["total"] == 5
 
-    def test_svg_generation(self, topology):
+    def test_mermaid_generation(self, topology):
         coordinator = _build_coordinator()
-        svg = coordinator.generate_svg(topology)
-        assert svg.startswith("<svg")
-        assert svg.rstrip().endswith("</svg>")
-        assert "MyHome1038137341" in svg
+        mermaid = coordinator.generate_mermaid(topology)
+        # Fenced mermaid block so a Markdown card renders it in-browser
+        assert mermaid.startswith("```mermaid")
+        assert mermaid.rstrip().endswith("```")
+        assert "flowchart TD" in mermaid
+        # Leader node + a mesh edge + at least one child edge are present
+        assert "👑" in mermaid
+        assert "---" in mermaid  # leader-to-router mesh link
+        assert "-->" in mermaid  # router-to-child link
+
+    def test_mermaid_empty_network(self):
+        coordinator = _build_coordinator()
+        mermaid = coordinator.generate_mermaid({"nodes": {}, "network_name": "Empty"})
+        assert mermaid.startswith("```mermaid")
+        assert "No routers found" in mermaid
 
 
 class TestBorderRouterIdentification:

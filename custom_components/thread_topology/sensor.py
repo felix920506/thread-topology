@@ -202,6 +202,7 @@ class ThreadTopologyMapSensor(CoordinatorEntity[ThreadTopologyCoordinator], Sens
 
         return {
             "topology_text": "\n".join(lines),
+            "mermaid": self.coordinator.generate_mermaid(data),
             "nodes": nodes,
             "matter_devices": matter,
             "raw_data": data,

@@ -2,18 +2,18 @@
 # Copy any of these configurations to your dashboard
 
 # ===========================================
-# EASIEST: The topology diagram as a Picture card
+# EASIEST: The topology diagram (Mermaid graph)
 # ===========================================
-# Uses the image entity - just add it, no templates needed.
-# (In the UI editor: Add Card -> By Entity -> image.thread_topology)
+# A Markdown card renders the Mermaid diagram in-browser and auto-lays it out,
+# so nodes never overlap no matter how big the network is.
 
-type: picture
-image_entity: image.thread_topology
+type: markdown
+title: Thread Network
+content: "{{ state_attr('sensor.thread_topology_map', 'mermaid') }}"
 
 # ===========================================
-# SIMPLE: The topology map as text
+# SIMPLE: The topology map as a text tree
 # ===========================================
-# Add this markdown card to display the full topology
 
 type: markdown
 title: Thread Network
@@ -54,9 +54,9 @@ cards:
         color: purple
         state_content: matter_wifi_devices
 
-  # Topology map
+  # Topology diagram (Mermaid)
   - type: markdown
-    content: "{{ state_attr('sensor.thread_topology_map', 'topology_text') }}"
+    content: "{{ state_attr('sensor.thread_topology_map', 'mermaid') }}"
 
 # ===========================================
 # STYLED: With monospace font (requires card-mod)
