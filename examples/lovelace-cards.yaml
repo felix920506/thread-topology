@@ -77,12 +77,12 @@ card_mod:
 type: horizontal-stack
 cards:
   - type: tile
-    entity: sensor.thread_node_3f0b  # Replace with your sensor
-    name: SkyConnect (Leader)
+    entity: sensor.thread_node_f228  # Replace with your sensor
+    name: Leader
     icon: mdi:crown
     color: amber
   - type: tile
-    entity: sensor.thread_node_ea17  # Replace with your sensor
-    name: Eero Border Router
+    entity: sensor.thread_node_3c00  # Replace with your sensor
+    name: Home Assistant OTBR
     icon: mdi:router-wireless
     color: blue

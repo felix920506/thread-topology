@@ -27,6 +27,7 @@ from .const import (
     DISCOVERY_MAX_RETRIES,
     DOMAIN,
     ENDPOINT_ACTIONS,
+    ENDPOINT_DEVICES,
     ENDPOINT_DIAGNOSTICS,
     ENDPOINT_NODE,
     REQUEST_TIMEOUT,
@@ -231,13 +232,17 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # 3. Refresh + read per-router diagnostics
             diagnostics = await self._fetch_diagnostics(node_attrs)
 
+            # 4. Read the device collection (authoritative per-device roles;
+            # routers without a diagnostics entry still appear here)
+            devices = self._resource_list(await self._get_json(ENDPOINT_DEVICES))
+
             # Get Matter devices and Thread Border Routers from HA device registry
             matter_devices = self._get_matter_devices()
             thread_routers = self._get_thread_border_routers()
 
-            # 4. Process and combine data
+            # 5. Process and combine data
             topology = self._process_topology(
-                node_attrs, diagnostics, matter_devices, thread_routers
+                node_attrs, devices, diagnostics, matter_devices, thread_routers
             )
 
             return topology
@@ -559,19 +564,23 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return routers
 
     def _identify_router(
-        self, ext_address: str, is_leader: bool, router_index: int
+        self, ext_address: str, is_self: bool, router_index: int
     ) -> dict[str, str]:
-        """Identify a router by its extended address or characteristics."""
-        # Check if this is the OTBR leader (typically SkyConnect or similar)
-        if is_leader:
+        """Identify a router by its extended address or characteristics.
+
+        ``is_self`` marks the OTBR node this integration is talking to (the Home
+        Assistant Thread radio), which is not necessarily the network leader.
+        """
+        ext_normalized = _normalize_address(ext_address)
+
+        # The queried OTBR node is the Home Assistant border router itself
+        if is_self:
             return {
-                "name": "SkyConnect (OTBR)",
+                "name": "Home Assistant OTBR",
                 "manufacturer": "Nabu Casa",
                 "type": "border_router",
                 "icon": "home-assistant",
             }
-
-        ext_normalized = _normalize_address(ext_address)
 
         # Check custom routers first (user-defined in custom_routers.yaml)
         for custom in self._custom_routers:
@@ -617,127 +626,131 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "icon": "router",
                 }
 
-        # Generic fallback with numbering
-        router_names = [
-            ("Eero", "Amazon/Eero"),
-            ("Google Nest", "Google"),
-            ("Apple HomePod", "Apple"),
-            ("SmartThings", "Samsung"),
-            ("Thread Router", "Unknown"),
-        ]
-
-        # Cycle through router types based on index
-        name, manufacturer = router_names[router_index % len(router_names)]
-        if router_index > 0:
-            name = f"{name} #{router_index + 1}"
-
+        # Neutral fallback: identify by the last 4 hex of the address rather than
+        # inventing a brand. Use custom_routers.yaml to assign real names.
+        short = ext_normalized[-4:] if len(ext_normalized) >= 4 else ext_normalized
         return {
-            "name": name,
-            "manufacturer": manufacturer,
+            "name": f"Thread Router ({short})",
+            "manufacturer": "Unknown",
             "type": "border_router",
             "icon": "router",
         }
 
-    def _match_end_device(
-        self, parent_rloc: int, child_idx: int, matter_devices: list[dict]
-    ) -> dict[str, Any] | None:
-        """Try to match an end device with a Matter device."""
-        # Get Thread-only Matter devices
-        thread_devices = [d for d in matter_devices if d["transport"] == "thread"]
-
-        # Simple heuristic: assign devices based on order
-        # In a real implementation, you'd need to query Matter fabric data
-        if child_idx < len(thread_devices):
-            return thread_devices[child_idx]
-
-        return None
-
     def _process_topology(
         self,
         node_attrs: dict,
+        devices: list[dict],
         diagnostics: list[dict],
         matter_devices: list[dict],
         thread_routers: list[dict],
     ) -> dict[str, Any]:
-        """Process OTBR data (node + diagnostics collection) into topology.
+        """Process OTBR data (node + device + diagnostics collections) into topology.
 
-        ``diagnostics`` are the JSON:API resources from ``/api/diagnostics``;
-        each describes one router (its ``route`` table and ``childTable``). The
-        leader is the router whose ``routerId`` equals the node's
-        ``leaderData.leaderRouterId`` (the queried node is not necessarily the
-        leader). The internal topology dict is unchanged so the SVG generator and
-        sensors are unaffected.
+        Router nodes are the union of role=router/leader devices from
+        ``/api/devices`` and the entries in ``/api/diagnostics`` — so a router
+        that has no fresh diagnostics entry still appears as a router instead of
+        being dropped (and instead of a Matter name being mis-assigned to one of
+        its children). The leader is the router whose ``routerId`` equals the
+        node's ``leaderData.leaderRouterId`` (the queried node is the Home
+        Assistant radio, which is not necessarily the leader).
+
+        Children come from each router's ``childTable``. The OTBR API does not
+        expose a child's extended address there, so children are intentionally
+        left unnamed rather than guessing a Matter name by position.
         """
         network_name = _first(node_attrs, "networkName", "networkname", default="Unknown")
-        num_routers = _first(
-            node_attrs, "routerCount", "numOfRouter", "numberOfRouters", default=0
-        )
         state = _first(node_attrs, "state", default="unknown")
         leader_data = node_attrs.get("leaderData", {}) or {}
         leader_router_id = _first(leader_data, "leaderRouterId", default=None)
+        self_ext = _normalize_address(
+            _first(node_attrs, "extAddress", "extaddress", default="")
+        )
 
-        # Separate Thread and WiFi Matter devices
+        # Separate Thread and WiFi Matter devices (informational only)
         thread_matter = [d for d in matter_devices if d["transport"] == "thread"]
         wifi_matter = [d for d in matter_devices if d["transport"] == "wifi"]
 
-        def _router_id(attrs: dict, rloc_int: int) -> int:
-            rid = _first(attrs, "routerId", default=None)
-            return rid if isinstance(rid, int) else rloc_int >> 10
-
-        # Sort leader first, then by rloc16, for stable router numbering
-        def _sort_key(diag: dict) -> tuple[int, int]:
+        # Index diagnostics by normalized extended address
+        diag_by_ext: dict[str, dict] = {}
+        for diag in diagnostics:
             attrs = diag.get("attributes", {})
-            rloc_int = _parse_rloc16(_first(attrs, "rloc16", default=0)) or 0
-            rid = _router_id(attrs, rloc_int)
-            return (0 if rid == leader_router_id else 1, rloc_int)
+            ext = _first(attrs, "extAddress", "extaddress", default="") or diag.get("id", "")
+            if ext:
+                diag_by_ext[_normalize_address(ext)] = attrs
+
+        # Build the router set: role=router/leader devices unioned with any
+        # router that only appears in the diagnostics collection.
+        router_exts: dict[str, str] = {}
+        for device in devices:
+            attrs = device.get("attributes", {})
+            role = str(_first(attrs, "role", default="")).lower()
+            if "router" in role or "leader" in role:
+                ext = device.get("id") or _first(attrs, "extAddress", "extaddress", default="")
+                if ext:
+                    router_exts.setdefault(_normalize_address(ext), ext)
+        for diag in diagnostics:
+            attrs = diag.get("attributes", {})
+            ext = _first(attrs, "extAddress", "extaddress", default="") or diag.get("id", "")
+            if ext:
+                router_exts.setdefault(_normalize_address(ext), ext)
+
+        def _router_id(attrs: dict, rloc_int: int) -> int | None:
+            rid = _first(attrs, "routerId", default=None)
+            if isinstance(rid, int):
+                return rid
+            return rloc_int >> 10 if rloc_int else None
+
+        # Resolve each router's diagnostics, rloc16 and routerId
+        resolved = []
+        for norm_ext, ext_address in router_exts.items():
+            diag = diag_by_ext.get(norm_ext, {})
+            rloc_int = _parse_rloc16(_first(diag, "rloc16", default=None)) or 0
+            router_id = _router_id(diag, rloc_int)
+            is_leader = leader_router_id is not None and router_id == leader_router_id
+            resolved.append((norm_ext, ext_address, diag, rloc_int, router_id, is_leader))
+
+        # Sort leader first, then by rloc16, for stable ordering
+        resolved.sort(key=lambda r: (0 if r[5] else 1, r[3]))
 
         nodes: dict[str, dict] = {}
-        thread_device_idx = 0
         router_index = 0
         leader_ext_address = ""
 
-        for diag in sorted(diagnostics, key=_sort_key):
-            attrs = diag.get("attributes", {})
-            ext_address = _first(attrs, "extAddress", "extaddress", default="") or diag.get(
-                "id", ""
-            )
-            if not ext_address:
-                continue
-
-            rloc_int = _parse_rloc16(_first(attrs, "rloc16", default=0)) or 0
-            router_id = _router_id(attrs, rloc_int)
-            is_leader = leader_router_id is not None and router_id == leader_router_id
+        for norm_ext, ext_address, diag, rloc_int, router_id, is_leader in resolved:
             if is_leader:
                 leader_ext_address = ext_address
             role = "leader" if is_leader else "router"
 
-            # Get router identification
-            router_info = self._identify_router(ext_address, is_leader, router_index)
+            is_self = norm_ext == self_ext and bool(self_ext)
+            router_info = self._identify_router(ext_address, is_self, router_index)
             router_index += 1
 
             # Route table (the build names this TLV "route"; "route64" on others)
-            route = _first(attrs, "route", "route64", default={}) or {}
+            route = _first(diag, "route", "route64", default={}) or {}
             route_data = _first(route, "routeData", "routes", default=[]) or []
 
             # Link quality: prefer a connectivity TLV when present, otherwise
             # derive it from the best inbound link to a neighbouring router.
-            connectivity = _first(attrs, "connectivity", default={}) or {}
+            connectivity = _first(diag, "connectivity", default={}) or {}
             leader_cost = _first(connectivity, "leaderCost", default=0)
             if connectivity:
                 lq3 = _first(connectivity, "linkQuality3", default=0)
                 lq2 = _first(connectivity, "linkQuality2", default=0)
                 lq1 = _first(connectivity, "linkQuality1", default=0)
                 link_quality = 3 if lq3 > 0 else 2 if lq2 > 0 else 1 if lq1 > 0 else 0
-            else:
+            elif route_data:
                 neighbour_lq = [
                     _first(rd, "linkQualityIn", default=0)
                     for rd in route_data
                     if _first(rd, "routeId", "routerId", default=None) != router_id
                 ]
                 link_quality = min(max(neighbour_lq), 3) if neighbour_lq else 0
+            else:
+                # No diagnostics for this router -> link quality is unknown
+                link_quality = None
 
-            # Get children and try to match with Matter devices
-            child_table = _first(attrs, "childTable", default=[]) or []
+            # Children come from the router's child table (left unnamed)
+            child_table = _first(diag, "childTable", default=[]) or []
             children = []
             for child in child_table:
                 child_id = _first(child, "childId", default=0)
@@ -745,31 +758,18 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 rx_on_idle = _first(child_mode, "rxOnWhenIdle", default=True)
                 child_type = "active" if _is_truthy(rx_on_idle) else "sleepy"
 
-                # Try to match with a Matter device
-                matter_match = None
-                if thread_device_idx < len(thread_matter):
-                    matter_match = thread_matter[thread_device_idx]
-                    thread_device_idx += 1
-
                 # A child's rloc16 is the parent router rloc16 with the child id
                 # in the low bits.
                 child_rloc = _parse_rloc16(_first(child, "rloc16", default=None))
                 if child_rloc is None:
                     child_rloc = (rloc_int & 0xFC00) | child_id
 
-                child_info = {
+                children.append({
                     "id": child_id,
                     "type": child_type,
                     "timeout": _first(child, "timeout", default=0),
                     "rloc16": child_rloc,
-                }
-
-                if matter_match:
-                    child_info["name"] = matter_match["name"]
-                    child_info["manufacturer"] = matter_match["manufacturer"]
-                    child_info["model"] = matter_match["model"]
-
-                children.append(child_info)
+                })
 
             # Mesh connections from the route table (skip the self entry)
             connections = []
@@ -799,7 +799,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "child_count": len(children),
                 "connections": connections,
                 "ip_addresses": _first(
-                    attrs, "ipv6AddressList", "ipv6Addresses", default=[]
+                    diag, "ipv6AddressList", "ipv6Addresses", default=[]
                 ) or [],
             }
 
@@ -807,7 +807,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "network_name": network_name,
             "state": state,
             "leader_address": leader_ext_address,
-            "router_count": num_routers,
+            "router_count": len(nodes),
             "nodes": nodes,
             "total_devices": len(nodes) + sum(n["child_count"] for n in nodes.values()),
             "matter_devices": {
@@ -858,7 +858,8 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             role = node.get("role", "router")
             emoji = "\U0001f451" if role == "leader" else "\U0001f4e1"
             role_label = "Leader" if role == "leader" else "Router"
-            lq = lq_text[min(node.get("link_quality", 0), 3)]
+            lq_value = node.get("link_quality")
+            lq = lq_text[min(lq_value, 3)] if isinstance(lq_value, int) else "Unknown"
             lines.append("")
             lines.append(
                 f"{emoji} {node.get('name', 'Router')}  ·  {role_label}  ·  "

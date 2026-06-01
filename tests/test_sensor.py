@@ -19,7 +19,7 @@ def mock_coordinator_data():
                 "ext_address": "1EA5312CFB153F0B",
                 "rloc16": 55296,
                 "role": "leader",
-                "name": "SkyConnect (OTBR)",
+                "name": "Home Assistant OTBR",
                 "manufacturer": "Nabu Casa",
                 "device_type": "border_router",
                 "link_quality": 3,
@@ -172,7 +172,7 @@ class TestThreadTopologyMapSensor:
         topology_text = "\n".join(lines)
 
         assert "MyHome1038137341" in topology_text
-        assert "SkyConnect (OTBR)" in topology_text
+        assert "Home Assistant OTBR" in topology_text
         assert "👑" in topology_text
         assert "📡" in topology_text
         assert "Meross MS605" in topology_text
@@ -204,7 +204,7 @@ class TestThreadNodeSensor:
         node_data = mock_coordinator_data["nodes"]["1EA5312CFB153F0B"]
 
         assert node_data["role"] == "leader"
-        assert "SkyConnect" in node_data["name"]
+        assert "Home Assistant OTBR" in node_data["name"]
         assert node_data["link_quality"] == 3
 
     def test_router_node_attributes(self, mock_coordinator_data):

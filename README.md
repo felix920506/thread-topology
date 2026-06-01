@@ -28,7 +28,7 @@ A Home Assistant custom integration that visualizes your Thread network topology
 ## Features
 
 - **Visual Topology Map**: See your entire Thread network structure in a markdown card
-- **Device Identification**: Automatically identifies border routers (SkyConnect, Eero, Apple, Google)
+- **Device Identification**: Identifies the Home Assistant OTBR radio and known border routers (Eero, Apple, Google, …) by OUI
 - **Matter Integration**: Links Thread devices with their Matter device names from Home Assistant
 - **Link Quality Indicators**: Visual representation of connection quality (Poor/Fair/Good/Excellent)
 - **WiFi vs Thread**: Separates Matter devices by transport type
@@ -36,32 +36,29 @@ A Home Assistant custom integration that visualizes your Thread network topology
 
 ## What You'll See
 
-```
-🧵 Thread Network: MyHome
+```text
+🧵 ha-thread-bac3   (3 routers · 11 devices)
 
-Routers: 2 | Thread Devices: 4
-Matter: 3 Thread + 2 WiFi
+👑 Thread Router (F228)  ·  Leader  ·  LQ Excellent
+├─ 💤 Device 6
+└─ 💤 Device 15
 
----
+📡 Home Assistant OTBR  ·  Router  ·  LQ Excellent
+├─ 💤 Device 1
+└─ 💤 Device 2
 
-👑 SkyConnect (OTBR)
-Nabu Casa • Leader • LQ: [███] Excellent
-
-   └─ 💤 Smart Presence Sensor
-       Meross Smart Presence Sensor
-
-📡 Eero Border Router
-Amazon/Eero • Router • LQ: [███] Excellent
-
-   └─ 💤 Aqara Door and Window Sensor P2
-       Aqara Aqara Door and Window Sensor P2
-
----
+📡 Thread Router (D773)  ·  Router  ·  LQ Excellent
+├─ 💤 Device 1
+└─ 💤 Device 2
 
 📶 Matter over WiFi
-- Smart Lock (Nuki)
-- WiFi Smart Switch (SONOFF)
+• Smart Lock (Nuki)
+• WiFi Smart Switch (SONOFF)
 ```
+
+> Routers are named from their address OUI (or `custom_routers.yaml`); end
+> devices appear as `Device <id>` because the OTBR API does not expose a child's
+> address to map it to a friendly name.
 
 ## Requirements
 
@@ -124,15 +121,14 @@ For more complete examples including stats tiles, see the [examples/lovelace-car
 
 ## How It Works
 
-1. **OTBR API**: Reads `/api/node`, triggers network discovery and per-router diagnostics (by rloc16) via the `/api/actions` task queue, then reads the `/api/diagnostics` collection
-2. **Device Registry**: Queries Home Assistant's device registry for Matter devices
-3. **Smart Matching**: Maps Thread extended addresses to Matter device names
-4. **Transport Detection**: Identifies WiFi vs Thread based on device model/manufacturer
+1. **OTBR API**: Reads `/api/node`, triggers network discovery and per-router diagnostics (by rloc16) via the `/api/actions` task queue, then reads the `/api/devices` and `/api/diagnostics` collections
+2. **Topology**: Every role=router device becomes a node (the leader is the router whose `routerId` matches `leaderData.leaderRouterId`); each router's children come from its child table
+3. **Device Registry**: Lists your Home Assistant Matter devices for reference (Thread vs WiFi)
 
 ## Supported Border Routers
 
 The integration automatically identifies:
-- **Nabu Casa SkyConnect** (OTBR leader)
+- **This Home Assistant OTBR radio** (the node it queries)
 - **Amazon Eero** mesh routers
 - **Apple HomePod** / HomePod Mini
 - **Google Nest** Hub / WiFi
@@ -147,11 +143,11 @@ The integration automatically identifies:
 Routers are identified using the **OUI prefix** (first 3 bytes) of their Thread extended address. For example, a device with extended address `AABAD11C1D3AF27F` has OUI `AA:BA:D1`.
 
 The integration checks in this order:
-1. **Leader** — the OTBR leader is always identified as "SkyConnect (OTBR)"
+1. **This OTBR** — the radio this integration queries is labeled "Home Assistant OTBR"
 2. **Custom routers** — user-defined in `custom_routers.yaml` (see below)
 3. **Built-in OUI table** — ~30 known manufacturer prefixes
 4. **Pattern matching** — substring patterns for specific devices
-5. **Generic fallback** — numbered "Thread Router" names
+5. **Neutral fallback** — `Thread Router (XXXX)`, where `XXXX` is the last 4 hex of the extended address (assign a real name via `custom_routers.yaml`)
 
 ### Custom Border Router Configuration
 

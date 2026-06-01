@@ -41,8 +41,9 @@ def topology(
     coordinator = _build_coordinator()
     node_attrs = ThreadTopologyCoordinator._resource_attributes(mock_otbr_node_response)
     diagnostics = ThreadTopologyCoordinator._resource_list(mock_otbr_diagnostics_response)
+    # No device collection here -> routers come from the diagnostics entries
     return coordinator._process_topology(
-        node_attrs, diagnostics, mock_matter_devices, []
+        node_attrs, [], diagnostics, mock_matter_devices, []
     )
 
 
@@ -159,10 +160,38 @@ class TestProcessTopology:
         child6 = next(c for c in leader["children"] if c["id"] == 6)
         assert child6["rloc16"] == (0x1C00 | 6)
 
+    def test_children_are_unnamed(self, topology):
+        # The OTBR child table has no extended address, so children must NOT be
+        # given a (mis-assigned) Matter name.
+        for node in topology["nodes"].values():
+            for child in node["children"]:
+                assert "name" not in child
+
     def test_matter_split(self, topology):
         assert len(topology["matter_devices"]["thread"]) == 3
         assert len(topology["matter_devices"]["wifi"]) == 2
         assert topology["matter_devices"]["total"] == 5
+
+    def test_router_without_diagnostics_still_a_node(
+        self, mock_otbr_node_response, mock_otbr_diagnostics_response, mock_matter_devices
+    ):
+        """A role=router device with no diagnostics entry must appear as a router,
+        not be dropped or mislabeled as a child (regression: IKEA ALPSTUGA)."""
+        coordinator = _build_coordinator()
+        node_attrs = ThreadTopologyCoordinator._resource_attributes(mock_otbr_node_response)
+        diagnostics = ThreadTopologyCoordinator._resource_list(mock_otbr_diagnostics_response)
+        extra_router = "E20796B3C5CE55C5"
+        devices = [
+            {"id": extra_router, "type": "threadDevice", "attributes": {"role": "router"}},
+        ]
+        topo = coordinator._process_topology(
+            node_attrs, devices, diagnostics, mock_matter_devices, []
+        )
+        # 3 routers from diagnostics + the extra device-only router = 4
+        assert extra_router in topo["nodes"]
+        assert topo["nodes"][extra_router]["role"] == "router"
+        assert topo["nodes"][extra_router]["child_count"] == 0
+        assert topo["router_count"] == 4
 
     def test_tree_generation(self, topology):
         coordinator = _build_coordinator()
