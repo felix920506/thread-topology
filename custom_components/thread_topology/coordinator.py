@@ -22,6 +22,9 @@ from .const import (
     API_MEDIA_TYPE,
     DEFAULT_SCAN_INTERVAL,
     DIAGNOSTIC_TLV_TYPES,
+    DISCOVERY_DEVICE_COUNT,
+    DISCOVERY_MAX_AGE,
+    DISCOVERY_MAX_RETRIES,
     DOMAIN,
     ENDPOINT_ACTIONS,
     ENDPOINT_DEVICES,
@@ -205,9 +208,20 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             node = await self._get_json(ENDPOINT_NODE)
             node_attrs = self._resource_attributes(node)
 
-            # 2. Discover the network so the device collection is fresh
+            # 2. Discover the network so the device collection is fresh.
+            # All four attributes are required by updateDeviceCollectionTask.
             await self._run_actions(
-                [{"type": TASK_UPDATE_DEVICES, "attributes": {"timeout": ACTION_TIMEOUT}}]
+                [
+                    {
+                        "type": TASK_UPDATE_DEVICES,
+                        "attributes": {
+                            "maxAge": DISCOVERY_MAX_AGE,
+                            "maxRetries": DISCOVERY_MAX_RETRIES,
+                            "deviceCount": DISCOVERY_DEVICE_COUNT,
+                            "timeout": ACTION_TIMEOUT,
+                        },
+                    }
+                ]
             )
 
             # 3. Read the device collection
@@ -252,7 +266,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             headers={"Accept": API_MEDIA_TYPE},
             timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
         ) as response:
-            response.raise_for_status()
+            await self._raise_for_status(response, "GET", url)
             return await response.json()
 
     async def _post_actions(self, tasks: list[dict[str, Any]]) -> Any:
@@ -267,8 +281,27 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             },
             timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
         ) as response:
-            response.raise_for_status()
+            await self._raise_for_status(response, "POST", url)
             return await response.json()
+
+    @staticmethod
+    async def _raise_for_status(
+        response: aiohttp.ClientResponse, method: str, url: str
+    ) -> None:
+        """Raise for HTTP errors, logging the response body for diagnostics.
+
+        OTBR returns JSON:API error details (e.g. which task attribute was
+        rejected on a 422) in the body, which ``raise_for_status`` discards.
+        """
+        if response.status >= 400:
+            try:
+                body = await response.text()
+            except Exception:  # noqa: BLE001 - best-effort diagnostics only
+                body = "<unreadable response body>"
+            _LOGGER.error(
+                "OTBR %s %s -> HTTP %s: %s", method, url, response.status, body[:1000]
+            )
+        response.raise_for_status()
 
     async def _run_actions(self, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Enqueue tasks and poll them until each reaches a terminal status.

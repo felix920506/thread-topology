@@ -39,6 +39,11 @@ REQUEST_TIMEOUT = 10
 ACTION_TIMEOUT = 60
 ACTION_POLL_INTERVAL = 1.0
 
+# updateDeviceCollectionTask required attributes (all four are mandatory)
+DISCOVERY_MAX_AGE = 30
+DISCOVERY_MAX_RETRIES = 5
+DISCOVERY_DEVICE_COUNT = 64
+
 # Update interval in seconds (heavier now: discovery + per-router diagnostics)
 DEFAULT_SCAN_INTERVAL = 60
 
