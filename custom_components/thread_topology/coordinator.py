@@ -27,7 +27,6 @@ from .const import (
     DISCOVERY_MAX_RETRIES,
     DOMAIN,
     ENDPOINT_ACTIONS,
-    ENDPOINT_DEVICES,
     ENDPOINT_DIAGNOSTICS,
     ENDPOINT_NODE,
     REQUEST_TIMEOUT,
@@ -229,20 +228,16 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # 2. Discover the network so the collections are fresh (best effort).
             await self._refresh_device_collection()
 
-            # 3. Refresh + read per-router diagnostics
+            # 3. Refresh + read per-router diagnostics (the live mesh)
             diagnostics = await self._fetch_diagnostics(node_attrs)
-
-            # 4. Read the device collection (authoritative per-device roles;
-            # routers without a diagnostics entry still appear here)
-            devices = self._resource_list(await self._get_json(ENDPOINT_DEVICES))
 
             # Get Matter devices and Thread Border Routers from HA device registry
             matter_devices = self._get_matter_devices()
             thread_routers = self._get_thread_border_routers()
 
-            # 5. Process and combine data
+            # 4. Process and combine data
             topology = self._process_topology(
-                node_attrs, devices, diagnostics, matter_devices, thread_routers
+                node_attrs, diagnostics, matter_devices, thread_routers
             )
 
             return topology
@@ -706,20 +701,18 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _process_topology(
         self,
         node_attrs: dict,
-        devices: list[dict],
         diagnostics: list[dict],
         matter_devices: list[dict],
         thread_routers: list[dict],
     ) -> dict[str, Any]:
-        """Process OTBR data (node + device + diagnostics collections) into topology.
+        """Process OTBR data (node + diagnostics collection) into topology.
 
-        Router nodes are the union of role=router/leader devices from
-        ``/api/devices`` and the entries in ``/api/diagnostics`` — so a router
-        that has no fresh diagnostics entry still appears as a router instead of
-        being dropped (and instead of a Matter name being mis-assigned to one of
-        its children). The leader is the router whose ``routerId`` equals the
-        node's ``leaderData.leaderRouterId`` (the queried node is the Home
-        Assistant radio, which is not necessarily the leader).
+        Router nodes come from the live ``/api/diagnostics`` entries — the
+        routers actually present/responding in the mesh, matching what the OTBR
+        web UI graphs. (The cached ``/api/devices`` collection is deliberately
+        NOT used: it retains stale entries for devices that have left the
+        network, which would show as phantom routers.) The leader is the router
+        whose ``routerId`` equals the node's ``leaderData.leaderRouterId``.
 
         Children come from each router's ``children`` diagnostic (which includes
         each child's extended address), so they are matched to Home Assistant
@@ -756,16 +749,8 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if ext:
                 diag_by_ext[_normalize_address(ext)] = attrs
 
-        # Build the router set: role=router/leader devices unioned with any
-        # router that only appears in the diagnostics collection.
+        # Build the router set from the live diagnostics entries only.
         router_exts: dict[str, str] = {}
-        for device in devices:
-            attrs = device.get("attributes", {})
-            role = str(_first(attrs, "role", default="")).lower()
-            if "router" in role or "leader" in role:
-                ext = device.get("id") or _first(attrs, "extAddress", "extaddress", default="")
-                if ext:
-                    router_exts.setdefault(_normalize_address(ext), ext)
         for diag in diagnostics:
             attrs = diag.get("attributes", {})
             ext = _first(attrs, "extAddress", "extaddress", default="") or diag.get("id", "")

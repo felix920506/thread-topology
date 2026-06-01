@@ -122,8 +122,8 @@ For more complete examples including stats tiles, see the [examples/lovelace-car
 
 ## How It Works
 
-1. **OTBR API**: Reads `/api/node`, triggers network discovery and per-router diagnostics (by rloc16) via the `/api/actions` task queue, then reads the `/api/devices` and `/api/diagnostics` collections
-2. **Topology**: Every role=router device becomes a node (the leader is the router whose `routerId` matches `leaderData.leaderRouterId`); each router's children come from its child table
+1. **OTBR API**: Reads `/api/node`, triggers per-router diagnostics (by rloc16) via the `/api/actions` task queue, then reads the live `/api/diagnostics` collection
+2. **Topology**: Every router present in the live diagnostics becomes a node — matching what the OTBR web UI graphs (the cached `/api/devices` list is not used, as it keeps stale entries for devices that have left). The leader is the router whose `routerId` matches `leaderData.leaderRouterId`; each router's children come from its `children` diagnostic
 3. **Matter names**: Reads your Home Assistant Matter devices' Thread extended address (the "MAC address" on the device's *Matter info* panel) and matches it to the OTBR device by extended address — so **both routers and sleepy end devices** show their real Home Assistant name. Children come from the per‑router `children` diagnostic, which includes each child's extended address
 
 ## Supported Border Routers

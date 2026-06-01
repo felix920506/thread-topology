@@ -41,9 +41,8 @@ def topology(
     coordinator = _build_coordinator()
     node_attrs = ThreadTopologyCoordinator._resource_attributes(mock_otbr_node_response)
     diagnostics = ThreadTopologyCoordinator._resource_list(mock_otbr_diagnostics_response)
-    # No device collection here -> routers come from the diagnostics entries
     return coordinator._process_topology(
-        node_attrs, [], diagnostics, mock_matter_devices, []
+        node_attrs, diagnostics, mock_matter_devices, []
     )
 
 
@@ -181,7 +180,7 @@ class TestProcessTopology:
                 "rloc16": None,
             }
         ]
-        topo = coordinator._process_topology(node_attrs, [], diagnostics, matter, [])
+        topo = coordinator._process_topology(node_attrs, diagnostics, matter, [])
         assert topo["nodes"][ROUTER_B]["name"] == "IKEA ALPSTUGA"
 
     def test_child_named_from_matter_ext_address(
@@ -195,7 +194,7 @@ class TestProcessTopology:
         matter = [
             {"name": "Aqara Sensor", "transport": "thread", "ext_address": "aaaa000000000006"}
         ]
-        topo = coordinator._process_topology(node_attrs, [], diagnostics, matter, [])
+        topo = coordinator._process_topology(node_attrs, diagnostics, matter, [])
         named = [
             c.get("name")
             for c in topo["nodes"][LEADER]["children"]
@@ -208,26 +207,18 @@ class TestProcessTopology:
         assert len(topology["matter_devices"]["wifi"]) == 2
         assert topology["matter_devices"]["total"] == 5
 
-    def test_router_without_diagnostics_still_a_node(
-        self, mock_otbr_node_response, mock_otbr_diagnostics_response, mock_matter_devices
+    def test_stale_device_not_shown_as_router(
+        self, mock_otbr_node_response, mock_otbr_diagnostics_response
     ):
-        """A role=router device with no diagnostics entry must appear as a router,
-        not be dropped or mislabeled as a child (regression: IKEA ALPSTUGA)."""
+        """Routers come only from live diagnostics; stale device-collection
+        entries with no diagnostics must NOT appear (regression: phantom 55C5)."""
         coordinator = _build_coordinator()
         node_attrs = ThreadTopologyCoordinator._resource_attributes(mock_otbr_node_response)
         diagnostics = ThreadTopologyCoordinator._resource_list(mock_otbr_diagnostics_response)
-        extra_router = "E20796B3C5CE55C5"
-        devices = [
-            {"id": extra_router, "type": "threadDevice", "attributes": {"role": "router"}},
-        ]
-        topo = coordinator._process_topology(
-            node_attrs, devices, diagnostics, mock_matter_devices, []
-        )
-        # 3 routers from diagnostics + the extra device-only router = 4
-        assert extra_router in topo["nodes"]
-        assert topo["nodes"][extra_router]["role"] == "router"
-        assert topo["nodes"][extra_router]["child_count"] == 0
-        assert topo["router_count"] == 4
+        topo = coordinator._process_topology(node_attrs, diagnostics, [], [])
+        # Only the 3 routers that have diagnostics entries
+        assert len(topo["nodes"]) == 3
+        assert "E20796B3C5CE55C5" not in topo["nodes"]
 
     def test_tree_generation(self, topology):
         coordinator = _build_coordinator()
