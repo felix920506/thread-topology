@@ -103,6 +103,13 @@ def mock_otbr_diagnostics_response() -> dict:
                         {"childId": 15, "timeout": 12, "linkQuality": 2,
                          "mode": {"rxOnWhenIdle": True, "deviceTypeFTD": False}},
                     ],
+                    # Richer "children" TLV: each child carries its extAddress
+                    "children": [
+                        {"childId": 6, "rloc16": "0x1c06", "timeout": 12,
+                         "rxOnWhenIdle": False, "extAddress": "AAAA000000000006"},
+                        {"childId": 15, "rloc16": "0x1c0f", "timeout": 12,
+                         "rxOnWhenIdle": True, "extAddress": "BBBB00000000000F"},
+                    ],
                 },
             },
             {

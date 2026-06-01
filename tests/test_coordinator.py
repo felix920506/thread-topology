@@ -184,21 +184,16 @@ class TestProcessTopology:
         topo = coordinator._process_topology(node_attrs, [], diagnostics, matter, [])
         assert topo["nodes"][ROUTER_B]["name"] == "IKEA ALPSTUGA"
 
-    def test_child_named_from_matter_rloc16(
+    def test_child_named_from_matter_ext_address(
         self, mock_otbr_node_response, mock_otbr_diagnostics_response
     ):
-        """A child matched to a HA Matter device by rloc16 is named."""
+        """A child from the 'children' TLV is named by matching its extAddress."""
         coordinator = _build_coordinator()
         node_attrs = ThreadTopologyCoordinator._resource_attributes(mock_otbr_node_response)
         diagnostics = ThreadTopologyCoordinator._resource_list(mock_otbr_diagnostics_response)
-        # Leader rloc 0x1c00, child id 6 -> child rloc16 = 0x1c00 | 6
+        # Leader child id 6 has extAddress AAAA000000000006 in the fixture
         matter = [
-            {
-                "name": "Aqara Sensor",
-                "transport": "thread",
-                "ext_address": None,
-                "rloc16": 0x1C00 | 6,
-            }
+            {"name": "Aqara Sensor", "transport": "thread", "ext_address": "aaaa000000000006"}
         ]
         topo = coordinator._process_topology(node_attrs, [], diagnostics, matter, [])
         named = [

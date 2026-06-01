@@ -30,6 +30,9 @@ DIAGNOSTIC_TLV_TYPES = [
     "route",
     "leaderData",
     "childTable",
+    # "children" returns each child's extAddress + rloc16 (so children can be
+    # matched to Home Assistant Matter devices and named).
+    "children",
 ]
 
 # Terminal statuses for an action/task in the queue

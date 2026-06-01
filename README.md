@@ -39,27 +39,27 @@ A Home Assistant custom integration that visualizes your Thread network topology
 ```text
 🧵 ha-thread-bac3   (3 routers · 11 devices)
 
-👑 Thread Router (F228)  ·  Leader  ·  LQ Excellent
-├─ 💤 Device 0x1c06
-└─ 💤 Device 0x1c0f
+👑 IKEA ALPSTUGA  ·  Leader  ·  LQ Excellent
+├─ 💤 Aqara Door Sensor
+└─ 💤 Device (1C0F)
 
 📡 Thread Router (E9DA)  ·  Router  ·  LQ Excellent  ·  🌐 connected OTBR
-├─ 💤 Device 0x3c01
-└─ 💤 Device 0x3c02
+├─ 💤 Eve Motion
+└─ 💤 Device (3C02)
 
 📡 Thread Router (D773)  ·  Router  ·  LQ Excellent
-├─ 💤 Device 0xf401
-└─ 💤 Device 0xf402
+├─ 💤 Device (F401)
+└─ 💤 Device (F402)
 
 📶 Matter over WiFi
 • Smart Lock (Nuki)
 • WiFi Smart Switch (SONOFF)
 ```
 
-> Routers are named from a matched Home Assistant Matter device, the address OUI,
-> or `custom_routers.yaml`; end devices appear as `Device 0x<rloc16>` because the
-> OTBR API does not expose a child's
-> address to map it to a friendly name.
+> Routers and end devices are named from a matched Home Assistant Matter device
+> (by extended address), the address OUI, or `custom_routers.yaml`. Devices Home
+> Assistant doesn't know (or non‑Matter Thread devices) fall back to
+> `Device (<address tail>)`.
 
 ## Requirements
 
@@ -124,7 +124,7 @@ For more complete examples including stats tiles, see the [examples/lovelace-car
 
 1. **OTBR API**: Reads `/api/node`, triggers network discovery and per-router diagnostics (by rloc16) via the `/api/actions` task queue, then reads the `/api/devices` and `/api/diagnostics` collections
 2. **Topology**: Every role=router device becomes a node (the leader is the router whose `routerId` matches `leaderData.leaderRouterId`); each router's children come from its child table
-3. **Matter names**: Reads your Home Assistant Matter devices' Thread extended address (the "MAC address" on the device's *Matter info* panel) and matches it to the OTBR device, so routers show their real Home Assistant name. Child end‑devices are named too when the Matter rloc16 is available (best‑effort)
+3. **Matter names**: Reads your Home Assistant Matter devices' Thread extended address (the "MAC address" on the device's *Matter info* panel) and matches it to the OTBR device by extended address — so **both routers and sleepy end devices** show their real Home Assistant name. Children come from the per‑router `children` diagnostic, which includes each child's extended address
 
 ## Supported Border Routers
 

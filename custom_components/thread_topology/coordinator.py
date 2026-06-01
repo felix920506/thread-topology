@@ -535,7 +535,6 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "identifiers": list(device.identifiers),
                         "transport": None,
                         "ext_address": None,
-                        "rloc16": None,
                     }
 
                     # Enrich with Thread address/role from the Matter node
@@ -559,12 +558,12 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return matter_devices
 
     def _enrich_matter_device(self, device: Any, entry: dict[str, Any]) -> None:
-        """Best-effort: read Thread ext address / rloc16 / transport for a device.
+        """Best-effort: read the Thread extended address + transport for a device.
 
-        Uses the Matter integration's client (``GeneralDiagnostics`` network
-        interfaces give the hardware address = Thread extended address and the
-        interface type; ``ThreadNetworkDiagnostics`` may provide the rloc16).
-        Wrapped in broad guards because this reaches into another integration.
+        Uses the Matter integration's client: ``GeneralDiagnostics`` network
+        interfaces give the hardware address (= Thread extended address, the
+        join key to OTBR) and the interface type (Thread vs WiFi). Wrapped in
+        broad guards because this reaches into another integration.
         """
         try:
             from homeassistant.components.matter.helpers import (
@@ -604,18 +603,6 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 break
             if itype in (1, 2):  # WiFi / Ethernet
                 entry["transport"] = "wifi"
-
-        # ThreadNetworkDiagnostics rloc16 (optional; used to name children)
-        try:
-            rloc16 = node.get_attribute_value(
-                0,
-                clusters.ThreadNetworkDiagnostics,
-                clusters.ThreadNetworkDiagnostics.Attributes.Rloc16,
-            )
-            if isinstance(rloc16, int):
-                entry["rloc16"] = rloc16
-        except Exception:  # noqa: BLE001 - attribute may not exist
-            pass
 
     def _get_thread_border_routers(self) -> list[dict[str, Any]]:
         """Get Thread Border Routers from Home Assistant device registry."""
@@ -734,9 +721,11 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         node's ``leaderData.leaderRouterId`` (the queried node is the Home
         Assistant radio, which is not necessarily the leader).
 
-        Children come from each router's ``childTable``. The OTBR API does not
-        expose a child's extended address there, so children are intentionally
-        left unnamed rather than guessing a Matter name by position.
+        Children come from each router's ``children`` diagnostic (which includes
+        each child's extended address), so they are matched to Home Assistant
+        Matter devices by extended address and named just like routers. Builds
+        that only return the legacy ``childTable`` (no address) leave children
+        unnamed rather than guessing.
         """
         network_name = _first(node_attrs, "networkName", "networkname", default="Unknown")
         state = _first(node_attrs, "state", default="unknown")
@@ -750,17 +739,14 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         thread_matter = [d for d in matter_devices if d["transport"] == "thread"]
         wifi_matter = [d for d in matter_devices if d["transport"] == "wifi"]
 
-        # Maps to name Thread devices from Home Assistant Matter data:
-        # by extended address (routers) and by rloc16 (children)
+        # Map to name Thread devices from Home Assistant Matter data, keyed by
+        # extended address (the "MAC" on the device's Matter info panel). The
+        # same key names both routers and children.
         matter_by_ext: dict[str, str] = {}
-        matter_by_rloc: dict[int, str] = {}
         for d in matter_devices:
             ext = d.get("ext_address")
             if ext:
                 matter_by_ext[_normalize_address(ext)] = d["name"]
-            rloc = d.get("rloc16")
-            if isinstance(rloc, int):
-                matter_by_rloc[rloc] = d["name"]
 
         # Index diagnostics by normalized extended address
         diag_by_ext: dict[str, dict] = {}
@@ -798,7 +784,10 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             diag = diag_by_ext.get(norm_ext, {})
             rloc_int = _parse_rloc16(_first(diag, "rloc16", default=None)) or 0
             router_id = _router_id(diag, rloc_int)
-            is_leader = leader_router_id is not None and router_id == leader_router_id
+            # Prefer the diagnostic's own isLeader flag; fall back to routerId
+            is_leader = _is_truthy(diag.get("isLeader")) or (
+                leader_router_id is not None and router_id == leader_router_id
+            )
             resolved.append((norm_ext, ext_address, diag, rloc_int, router_id, is_leader))
 
         # Sort leader first, then by rloc16, for stable ordering
@@ -847,13 +836,23 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # No diagnostics for this router -> link quality is unknown
                 link_quality = None
 
-            # Children come from the router's child table (left unnamed)
-            child_table = _first(diag, "childTable", default=[]) or []
+            # Children: prefer the "children" diagnostic (has each child's
+            # extAddress); fall back to the legacy childTable (childId only).
+            child_entries = _first(diag, "children", default=None)
+            use_children_tlv = child_entries is not None
+            if not use_children_tlv:
+                child_entries = _first(diag, "childTable", default=[]) or []
+
             children = []
-            for child in child_table:
+            for child in child_entries:
                 child_id = _first(child, "childId", default=0)
-                child_mode = _first(child, "mode", default={}) or {}
-                rx_on_idle = _first(child_mode, "rxOnWhenIdle", default=True)
+
+                # rxOnWhenIdle is top-level in "children", under "mode" in childTable
+                if use_children_tlv:
+                    rx_on_idle = _first(child, "rxOnWhenIdle", default=True)
+                else:
+                    child_mode = _first(child, "mode", default={}) or {}
+                    rx_on_idle = _first(child_mode, "rxOnWhenIdle", default=True)
                 child_type = "active" if _is_truthy(rx_on_idle) else "sleepy"
 
                 # A child's rloc16 is the parent router rloc16 with the child id
@@ -862,17 +861,21 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if child_rloc is None:
                     child_rloc = (rloc_int & 0xFC00) | child_id
 
+                child_ext = _first(child, "extAddress", "extaddress", default="")
+
                 child_info = {
                     "id": child_id,
                     "type": child_type,
                     "timeout": _first(child, "timeout", default=0),
                     "rloc16": child_rloc,
+                    "ext_address": child_ext,
                 }
-                # Name the child if Home Assistant knows a Matter device at this
-                # rloc16 (best-effort; many builds won't expose child rloc16).
-                child_name = matter_by_rloc.get(child_rloc)
-                if child_name:
-                    child_info["name"] = child_name
+                # Name the child by matching its extended address to a Home
+                # Assistant Matter device.
+                if child_ext:
+                    child_name = matter_by_ext.get(_normalize_address(child_ext))
+                    if child_name:
+                        child_info["name"] = child_name
                 children.append(child_info)
 
             # Mesh connections from the route table (skip the self entry)
@@ -976,9 +979,15 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for i, child in enumerate(children):
                 branch = "└─" if i == len(children) - 1 else "├─"
                 cemoji = "\U0001f4a4" if child.get("type") == "sleepy" else "\U0001f50b"
-                # childId is only unique per-router, so fall back to the globally
-                # unique rloc16 (not the childId) to avoid identical-looking labels.
-                cname = child.get("name") or f"Device 0x{child.get('rloc16', 0):04x}"
+                # Prefer the HA name; else identify by the extended-address tail
+                # (the "MAC" shown in HA), falling back to the unique rloc16.
+                cname = child.get("name")
+                if not cname:
+                    ext = (child.get("ext_address") or "").upper()
+                    cname = (
+                        f"Device ({ext[-4:]})" if ext
+                        else f"Device 0x{child.get('rloc16', 0):04x}"
+                    )
                 lines.append(f"{branch} {cemoji} {cname}")
 
         if wifi_matter:
