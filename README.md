@@ -123,7 +123,7 @@ For more complete examples including stats tiles, see the [examples/lovelace-car
 
 1. **OTBR API**: Reads `/api/node`, triggers network discovery and per-router diagnostics (by rloc16) via the `/api/actions` task queue, then reads the `/api/devices` and `/api/diagnostics` collections
 2. **Topology**: Every role=router device becomes a node (the leader is the router whose `routerId` matches `leaderData.leaderRouterId`); each router's children come from its child table
-3. **Device Registry**: Lists your Home Assistant Matter devices for reference (Thread vs WiFi)
+3. **Matter names**: Reads your Home Assistant Matter devices' Thread extended address (the "MAC address" on the device's *Matter info* panel) and matches it to the OTBR device, so routers show their real Home Assistant name. Child end‑devices are named too when the Matter rloc16 is available (best‑effort)
 
 ## Supported Border Routers
 
@@ -145,9 +145,10 @@ Routers are identified using the **OUI prefix** (first 3 bytes) of their Thread 
 The integration checks in this order:
 1. **This OTBR** — the radio this integration queries is labeled "Home Assistant OTBR"
 2. **Custom routers** — user-defined in `custom_routers.yaml` (see below)
-3. **Built-in OUI table** — ~30 known manufacturer prefixes
-4. **Pattern matching** — substring patterns for specific devices
-5. **Neutral fallback** — `Thread Router (XXXX)`, where `XXXX` is the last 4 hex of the extended address (assign a real name via `custom_routers.yaml`)
+3. **Home Assistant Matter name** — matched by Thread extended address (so a Matter router shows its HA device name)
+4. **Built-in OUI table** — ~30 known manufacturer prefixes
+5. **Pattern matching** — substring patterns for specific devices
+6. **Neutral fallback** — `Thread Router (XXXX)`, where `XXXX` is the last 4 hex of the extended address (assign a real name via `custom_routers.yaml`)
 
 ### Custom Border Router Configuration
 

@@ -161,11 +161,52 @@ class TestProcessTopology:
         assert child6["rloc16"] == (0x1C00 | 6)
 
     def test_children_are_unnamed(self, topology):
-        # The OTBR child table has no extended address, so children must NOT be
-        # given a (mis-assigned) Matter name.
+        # With no Matter rloc16 data, children must NOT be given a guessed name.
         for node in topology["nodes"].values():
             for child in node["children"]:
                 assert "name" not in child
+
+    def test_router_named_from_matter_ext_address(
+        self, mock_otbr_node_response, mock_otbr_diagnostics_response
+    ):
+        """A router matched to a HA Matter device by extended address is named."""
+        coordinator = _build_coordinator()
+        node_attrs = ThreadTopologyCoordinator._resource_attributes(mock_otbr_node_response)
+        diagnostics = ThreadTopologyCoordinator._resource_list(mock_otbr_diagnostics_response)
+        matter = [
+            {
+                "name": "IKEA ALPSTUGA",
+                "transport": "thread",
+                "ext_address": "4e6bc0581d23d773",  # ROUTER_B, lowercase
+                "rloc16": None,
+            }
+        ]
+        topo = coordinator._process_topology(node_attrs, [], diagnostics, matter, [])
+        assert topo["nodes"][ROUTER_B]["name"] == "IKEA ALPSTUGA"
+
+    def test_child_named_from_matter_rloc16(
+        self, mock_otbr_node_response, mock_otbr_diagnostics_response
+    ):
+        """A child matched to a HA Matter device by rloc16 is named."""
+        coordinator = _build_coordinator()
+        node_attrs = ThreadTopologyCoordinator._resource_attributes(mock_otbr_node_response)
+        diagnostics = ThreadTopologyCoordinator._resource_list(mock_otbr_diagnostics_response)
+        # Leader rloc 0x1c00, child id 6 -> child rloc16 = 0x1c00 | 6
+        matter = [
+            {
+                "name": "Aqara Sensor",
+                "transport": "thread",
+                "ext_address": None,
+                "rloc16": 0x1C00 | 6,
+            }
+        ]
+        topo = coordinator._process_topology(node_attrs, [], diagnostics, matter, [])
+        named = [
+            c.get("name")
+            for c in topo["nodes"][LEADER]["children"]
+            if c["id"] == 6
+        ]
+        assert named == ["Aqara Sensor"]
 
     def test_matter_split(self, topology):
         assert len(topology["matter_devices"]["thread"]) == 3

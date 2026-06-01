@@ -508,7 +508,15 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return attributes if isinstance(attributes, dict) else resource
 
     def _get_matter_devices(self) -> list[dict[str, Any]]:
-        """Get Matter devices from Home Assistant device registry."""
+        """Get Matter devices from Home Assistant, enriched with Thread address.
+
+        The device registry only stores the Matter node id + name, so the Thread
+        extended address / rloc16 (needed to map a device to its OTBR entry) is
+        read from the Matter integration's node data (the same source as the
+        device page's "Matter info" panel). All of that is best-effort: if the
+        Matter integration isn't present or its internals change, devices simply
+        come back without an address and the topology falls back to neutral names.
+        """
         device_registry = dr.async_get(self.hass)
         matter_devices = []
 
@@ -516,29 +524,98 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Check if device has matter identifier
             for identifier in device.identifiers:
                 if identifier[0] == "matter":
-                    # Determine transport type based on model name
                     model = (device.model or "").lower()
                     manufacturer = (device.manufacturer or "").lower()
                     name = device.name or "Unknown"
 
-                    # Detect WiFi vs Thread transport
-                    transport = "thread"  # Default to Thread
-                    if "wifi" in model or "wifi" in name.lower():
-                        transport = "wifi"
-                    elif manufacturer in ["nuki", "wemo", "lifx"]:
-                        # These typically use WiFi bridge for Matter
-                        transport = "wifi"
-
-                    matter_devices.append({
+                    entry = {
                         "name": name,
                         "model": device.model,
                         "manufacturer": device.manufacturer,
                         "identifiers": list(device.identifiers),
-                        "transport": transport,
-                    })
+                        "transport": None,
+                        "ext_address": None,
+                        "rloc16": None,
+                    }
+
+                    # Enrich with Thread address/role from the Matter node
+                    self._enrich_matter_device(device, entry)
+
+                    # Fall back to a name/model heuristic if the Matter node did
+                    # not tell us the transport.
+                    if entry["transport"] is None:
+                        if "wifi" in model or "wifi" in name.lower() or manufacturer in (
+                            "nuki",
+                            "wemo",
+                            "lifx",
+                        ):
+                            entry["transport"] = "wifi"
+                        else:
+                            entry["transport"] = "thread"
+
+                    matter_devices.append(entry)
                     break
 
         return matter_devices
+
+    def _enrich_matter_device(self, device: Any, entry: dict[str, Any]) -> None:
+        """Best-effort: read Thread ext address / rloc16 / transport for a device.
+
+        Uses the Matter integration's client (``GeneralDiagnostics`` network
+        interfaces give the hardware address = Thread extended address and the
+        interface type; ``ThreadNetworkDiagnostics`` may provide the rloc16).
+        Wrapped in broad guards because this reaches into another integration.
+        """
+        try:
+            from homeassistant.components.matter.helpers import (
+                get_node_from_device_entry,
+            )
+            from chip.clusters import Objects as clusters
+        except Exception:  # noqa: BLE001 - matter/chip may be absent
+            return
+
+        try:
+            node = get_node_from_device_entry(self.hass, device)
+        except Exception:  # noqa: BLE001 - internal API, stay defensive
+            node = None
+        if node is None:
+            return
+
+        # GeneralDiagnostics network interfaces -> Thread ext address + transport
+        try:
+            interfaces = node.get_attribute_value(
+                0,
+                clusters.GeneralDiagnostics,
+                clusters.GeneralDiagnostics.Attributes.NetworkInterfaces,
+            ) or []
+        except Exception:  # noqa: BLE001
+            interfaces = []
+
+        for iface in interfaces:
+            hw = getattr(iface, "hardwareAddress", None)
+            itype = getattr(iface, "type", None)
+            if not getattr(iface, "isOperational", True):
+                continue
+            hw_bytes = bytes(hw) if hw else b""
+            # Thread interface type is 4; a Thread MAC is an 8-byte EUI-64
+            if itype == 4 or len(hw_bytes) == 8:
+                entry["ext_address"] = hw_bytes.hex()
+                entry["transport"] = "thread"
+                break
+            if itype in (1, 2):  # WiFi / Ethernet
+                entry["transport"] = "wifi"
+
+        # ThreadNetworkDiagnostics rloc16 (optional; used to name children)
+        try:
+            rloc16 = node.get_attribute_value(
+                0,
+                clusters.ThreadNetworkDiagnostics,
+                clusters.ThreadNetworkDiagnostics.Attributes.Rloc16,
+            )
+            if isinstance(rloc16, int):
+                entry["rloc16"] = rloc16
+        except Exception:  # noqa: BLE001 - attribute may not exist
+            pass
 
     def _get_thread_border_routers(self) -> list[dict[str, Any]]:
         """Get Thread Border Routers from Home Assistant device registry."""
@@ -564,12 +641,18 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return routers
 
     def _identify_router(
-        self, ext_address: str, is_self: bool, router_index: int
+        self,
+        ext_address: str,
+        is_self: bool,
+        router_index: int,
+        matter_name: str | None = None,
     ) -> dict[str, str]:
         """Identify a router by its extended address or characteristics.
 
         ``is_self`` marks the OTBR node this integration is talking to (the Home
         Assistant Thread radio), which is not necessarily the network leader.
+        ``matter_name`` is the Home Assistant device name when this router is a
+        known Matter device (matched by extended address).
         """
         ext_normalized = _normalize_address(ext_address)
 
@@ -597,6 +680,15 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "type": "border_router",
                     "icon": custom.get("icon", "router"),
                 }
+
+        # A Home Assistant Matter device matched by extended address
+        if matter_name:
+            return {
+                "name": matter_name,
+                "manufacturer": "Matter",
+                "type": "border_router",
+                "icon": "router",
+            }
 
         # Convert extended address to OUI format (XX:XX:XX)
         if len(ext_normalized) >= 6:
@@ -670,6 +762,18 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         thread_matter = [d for d in matter_devices if d["transport"] == "thread"]
         wifi_matter = [d for d in matter_devices if d["transport"] == "wifi"]
 
+        # Maps to name Thread devices from Home Assistant Matter data:
+        # by extended address (routers) and by rloc16 (children)
+        matter_by_ext: dict[str, str] = {}
+        matter_by_rloc: dict[int, str] = {}
+        for d in matter_devices:
+            ext = d.get("ext_address")
+            if ext:
+                matter_by_ext[_normalize_address(ext)] = d["name"]
+            rloc = d.get("rloc16")
+            if isinstance(rloc, int):
+                matter_by_rloc[rloc] = d["name"]
+
         # Index diagnostics by normalized extended address
         diag_by_ext: dict[str, dict] = {}
         for diag in diagnostics:
@@ -722,7 +826,9 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             role = "leader" if is_leader else "router"
 
             is_self = norm_ext == self_ext and bool(self_ext)
-            router_info = self._identify_router(ext_address, is_self, router_index)
+            router_info = self._identify_router(
+                ext_address, is_self, router_index, matter_by_ext.get(norm_ext)
+            )
             router_index += 1
 
             # Route table (the build names this TLV "route"; "route64" on others)
@@ -764,12 +870,18 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if child_rloc is None:
                     child_rloc = (rloc_int & 0xFC00) | child_id
 
-                children.append({
+                child_info = {
                     "id": child_id,
                     "type": child_type,
                     "timeout": _first(child, "timeout", default=0),
                     "rloc16": child_rloc,
-                })
+                }
+                # Name the child if Home Assistant knows a Matter device at this
+                # rloc16 (best-effort; many builds won't expose child rloc16).
+                child_name = matter_by_rloc.get(child_rloc)
+                if child_name:
+                    child_info["name"] = child_name
+                children.append(child_info)
 
             # Mesh connections from the route table (skip the self entry)
             connections = []
