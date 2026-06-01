@@ -818,32 +818,33 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "known_routers": thread_routers,
         }
 
-    @staticmethod
-    def _mermaid_label(text: str) -> str:
-        """Sanitize text for use inside a quoted Mermaid node label."""
-        cleaned = (text or "").replace('"', "'").replace("[", "(").replace("]", ")")
-        cleaned = cleaned.replace("{", "(").replace("}", ")").replace("|", "/")
-        cleaned = cleaned.replace("`", "'").replace("\n", " ")
-        return cleaned.strip() or "Unknown"
+    def generate_tree(self, topology: dict[str, Any]) -> str:
+        """Build a monospace ASCII tree diagram of the topology.
 
-    def generate_mermaid(self, topology: dict[str, Any]) -> str:
-        """Build a Mermaid flowchart of the topology.
-
-        Returned as a fenced ``mermaid`` code block so it can be dropped straight
-        into a Home Assistant Markdown card, which renders Mermaid in-browser.
-        Mermaid auto-lays-out the graph, so nodes never overlap regardless of how
-        many routers or children the network has.
+        Returned wrapped in a fenced code block so Home Assistant's built-in
+        Markdown card renders it preformatted (aligned, no whitespace collapse).
+        Unlike the previous fixed-coordinate SVG this never overlaps, and unlike
+        Mermaid it needs no custom card. Use it from a Markdown card via
+        ``{{ state_attr('sensor.thread_topology_map', 'topology_text') }}``.
         """
         nodes = topology.get("nodes", {})
         network_name = topology.get("network_name", "Thread Network")
         leader_addr = topology.get("leader_address", "")
+        router_count = topology.get("router_count", 0)
+        total_devices = topology.get("total_devices", 0)
+        matter = topology.get("matter_devices", {})
+        wifi_matter = matter.get("wifi", [])
         lq_text = ["Poor", "Fair", "Good", "Excellent"]
 
-        lines = ["```mermaid", "flowchart TD"]
+        lines = ["```text"]
+        lines.append(
+            f"\U0001f9f5 {network_name}   "
+            f"({router_count} routers · {total_devices} devices)"
+        )
 
         if not nodes:
-            label = self._mermaid_label(f"No routers found in {network_name}")
-            lines.append(f'  empty["{label}"]')
+            lines.append("")
+            lines.append("(no routers found)")
             lines.append("```")
             return "\n".join(lines)
 
@@ -853,33 +854,30 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             key=lambda kv: (0 if kv[0] == leader_addr else 1, kv[1].get("rloc16", 0)),
         )
 
-        ids: dict[str, str] = {}
-        for index, (ext, node) in enumerate(ordered):
-            node_id = f"n{index}"
-            ids[ext] = node_id
+        for ext, node in ordered:
             role = node.get("role", "router")
             emoji = "\U0001f451" if role == "leader" else "\U0001f4e1"
             role_label = "Leader" if role == "leader" else "Router"
             lq = lq_text[min(node.get("link_quality", 0), 3)]
-            name = self._mermaid_label(node.get("name", "Router"))
-            lines.append(f'  {node_id}["{emoji} {name}<br/>{role_label} - LQ {lq}"]')
+            lines.append("")
+            lines.append(
+                f"{emoji} {node.get('name', 'Router')}  ·  {role_label}  ·  "
+                f"LQ {lq}"
+            )
+            children = node.get("children", [])
+            for i, child in enumerate(children):
+                branch = "└─" if i == len(children) - 1 else "├─"
+                cemoji = "\U0001f4a4" if child.get("type") == "sleepy" else "\U0001f50b"
+                cname = child.get("name") or f"Device {child.get('id', i)}"
+                lines.append(f"{branch} {cemoji} {cname}")
 
-        # Router mesh: connect the leader to every other router
-        leader_id = ids.get(leader_addr)
-        if leader_id:
-            for ext, node in ordered:
-                if ext != leader_addr and node.get("role") in ("router", "leader"):
-                    lines.append(f"  {leader_id} --- {ids[ext]}")
-
-        # Children hang off their parent router
-        for ext, node in ordered:
-            parent_id = ids[ext]
-            for child_index, child in enumerate(node.get("children", [])):
-                child_id = f"{parent_id}c{child_index}"
-                emoji = "\U0001f4a4" if child.get("type") == "sleepy" else "\U0001f50b"
-                name = child.get("name") or f"Device {child.get('id', child_index)}"
-                lines.append(f'  {child_id}["{emoji} {self._mermaid_label(name)}"]')
-                lines.append(f"  {parent_id} --> {child_id}")
+        if wifi_matter:
+            lines.append("")
+            lines.append("\U0001f4f6 Matter over WiFi")
+            for device in wifi_matter:
+                manufacturer = device.get("manufacturer", "")
+                suffix = f" ({manufacturer})" if manufacturer else ""
+                lines.append(f"• {device.get('name', 'Device')}{suffix}")
 
         lines.append("```")
         return "\n".join(lines)

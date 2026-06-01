@@ -164,23 +164,22 @@ class TestProcessTopology:
         assert len(topology["matter_devices"]["wifi"]) == 2
         assert topology["matter_devices"]["total"] == 5
 
-    def test_mermaid_generation(self, topology):
+    def test_tree_generation(self, topology):
         coordinator = _build_coordinator()
-        mermaid = coordinator.generate_mermaid(topology)
-        # Fenced mermaid block so a Markdown card renders it in-browser
-        assert mermaid.startswith("```mermaid")
-        assert mermaid.rstrip().endswith("```")
-        assert "flowchart TD" in mermaid
-        # Leader node + a mesh edge + at least one child edge are present
-        assert "👑" in mermaid
-        assert "---" in mermaid  # leader-to-router mesh link
-        assert "-->" in mermaid  # router-to-child link
+        tree = coordinator.generate_tree(topology)
+        # Fenced code block so a Markdown card renders it monospace/aligned
+        assert tree.startswith("```text")
+        assert tree.rstrip().endswith("```")
+        assert "MyHome1038137341" in tree
+        assert "👑" in tree  # leader
+        assert "📡" in tree  # router
+        assert "└─" in tree  # child branch
 
-    def test_mermaid_empty_network(self):
+    def test_tree_empty_network(self):
         coordinator = _build_coordinator()
-        mermaid = coordinator.generate_mermaid({"nodes": {}, "network_name": "Empty"})
-        assert mermaid.startswith("```mermaid")
-        assert "No routers found" in mermaid
+        tree = coordinator.generate_tree({"nodes": {}, "network_name": "Empty"})
+        assert tree.startswith("```text")
+        assert "no routers found" in tree
 
 
 class TestBorderRouterIdentification:

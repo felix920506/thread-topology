@@ -2,18 +2,10 @@
 # Copy any of these configurations to your dashboard
 
 # ===========================================
-# EASIEST: The topology diagram (Mermaid graph)
+# EASIEST: The topology diagram (ASCII tree)
 # ===========================================
-# A Markdown card renders the Mermaid diagram in-browser and auto-lays it out,
-# so nodes never overlap no matter how big the network is.
-
-type: markdown
-title: Thread Network
-content: "{{ state_attr('sensor.thread_topology_map', 'mermaid') }}"
-
-# ===========================================
-# SIMPLE: The topology map as a text tree
-# ===========================================
+# The built-in Markdown card renders the monospace tree directly - no custom
+# cards or HACS dependencies needed.
 
 type: markdown
 title: Thread Network
@@ -54,9 +46,9 @@ cards:
         color: purple
         state_content: matter_wifi_devices
 
-  # Topology diagram (Mermaid)
+  # Topology diagram (ASCII tree)
   - type: markdown
-    content: "{{ state_attr('sensor.thread_topology_map', 'mermaid') }}"
+    content: "{{ state_attr('sensor.thread_topology_map', 'topology_text') }}"
 
 # ===========================================
 # STYLED: With monospace font (requires card-mod)

@@ -106,105 +106,20 @@ class ThreadTopologyMapSensor(CoordinatorEntity[ThreadTopologyCoordinator], Sens
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return topology as markdown."""
+        """Return the topology diagram and raw data as attributes.
+
+        ``topology_text`` is a monospace ASCII tree wrapped in a code fence so a
+        Home Assistant Markdown card renders it as an aligned diagram with no
+        extra dependencies.
+        """
         if not self.coordinator.data:
             return {}
 
         data = self.coordinator.data
-        nodes = data.get("nodes", {})
-        leader = data.get("leader_address", "")
-        matter = data.get("matter_devices", {})
-
-        # Build topology text with device names
-        lines = []
-        lines.append(f"## 🧵 Thread Network: {data.get('network_name', 'Unknown')}")
-        lines.append("")
-        lines.append(f"**Routers:** {data.get('router_count', 0)} | **Thread Devices:** {data.get('total_devices', 0)}")
-
-        # Add Matter summary
-        thread_count = len(matter.get("thread", []))
-        wifi_count = len(matter.get("wifi", []))
-        if thread_count or wifi_count:
-            lines.append(f"**Matter:** {thread_count} Thread + {wifi_count} WiFi")
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-
-        # Sort nodes: leader first, then routers
-        sorted_nodes = sorted(
-            nodes.items(),
-            key=lambda x: (0 if x[0] == leader else 1, x[1].get("rloc16", 0))
-        )
-
-        for ext_address, node in sorted_nodes:
-            role = node.get("role", "unknown")
-            name = node.get("name", f"Unknown ({ext_address[-4:].upper()})")
-            manufacturer = node.get("manufacturer", "")
-
-            # Role icon and styling
-            if role == "leader":
-                role_icon = "👑"
-                role_label = "Leader"
-            elif role == "router":
-                role_icon = "📡"
-                role_label = "Router"
-            else:
-                role_icon = "📱"
-                role_label = "End Device"
-
-            # Link quality indicator
-            lq = node.get("link_quality", 0)
-            lq_bar = "█" * lq + "░" * (3 - lq)
-            lq_text = ["Poor", "Fair", "Good", "Excellent"][min(lq, 3)]
-
-            lines.append(f"### {role_icon} {name}")
-            if manufacturer:
-                lines.append(f"*{manufacturer}* • {role_label} • LQ: [{lq_bar}] {lq_text}")
-            else:
-                lines.append(f"{role_label} • LQ: [{lq_bar}] {lq_text}")
-            lines.append("")
-
-            # Add children with device names
-            for child in node.get("children", []):
-                child_type = child.get("type", "unknown")
-                child_name = child.get("name")
-                child_manufacturer = child.get("manufacturer", "")
-                child_model = child.get("model", "")
-
-                # Child icon based on type
-                if child_type == "sleepy":
-                    child_icon = "💤"
-                    type_label = "Sleepy End Device"
-                else:
-                    child_icon = "📱"
-                    type_label = "End Device"
-
-                if child_name:
-                    # We have a name from Matter
-                    lines.append(f"   └─ {child_icon} **{child_name}**")
-                    if child_manufacturer or child_model:
-                        lines.append(f"       *{child_manufacturer}* {child_model}")
-                else:
-                    # Fallback to RLOC
-                    child_rloc = hex(child.get("rloc16", 0))
-                    lines.append(f"   └─ {child_icon} {type_label} ({child_rloc})")
-                lines.append("")
-
-        # Add Matter WiFi devices section
-        wifi_devices = matter.get("wifi", [])
-        if wifi_devices:
-            lines.append("---")
-            lines.append("")
-            lines.append("### 📶 Matter over WiFi")
-            for device in wifi_devices:
-                lines.append(f"- **{device['name']}** ({device.get('manufacturer', '')})")
-            lines.append("")
-
         return {
-            "topology_text": "\n".join(lines),
-            "mermaid": self.coordinator.generate_mermaid(data),
-            "nodes": nodes,
-            "matter_devices": matter,
+            "topology_text": self.coordinator.generate_tree(data),
+            "nodes": data.get("nodes", {}),
+            "matter_devices": data.get("matter_devices", {}),
             "raw_data": data,
         }
 

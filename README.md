@@ -111,20 +111,12 @@ Amazon/Eero • Router • LQ: [███] Excellent
 
 ## Dashboard Card
 
-The diagram is a [Mermaid](https://mermaid.js.org/) graph, which Home
-Assistant's **Markdown card renders in-browser** and auto-lays-out, so nodes
-never overlap. Just add a Markdown card pointing at the `mermaid` attribute:
+The diagram is a monospace ASCII tree that Home Assistant's **built-in Markdown
+card renders directly** (no custom cards or HACS dependencies). Just add a
+Markdown card pointing at the `topology_text` attribute:
 
 ```yaml
 type: markdown
-content: "{{ state_attr('sensor.thread_topology_map', 'mermaid') }}"
-```
-
-Prefer a plain text tree instead? Use the `topology_text` attribute:
-
-```yaml
-type: markdown
-title: Thread Network
 content: "{{ state_attr('sensor.thread_topology_map', 'topology_text') }}"
 ```
 
