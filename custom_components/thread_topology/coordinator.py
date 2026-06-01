@@ -981,7 +981,9 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for i, child in enumerate(children):
                 branch = "└─" if i == len(children) - 1 else "├─"
                 cemoji = "\U0001f4a4" if child.get("type") == "sleepy" else "\U0001f50b"
-                cname = child.get("name") or f"Device {child.get('id', i)}"
+                # childId is only unique per-router, so fall back to the globally
+                # unique rloc16 (not the childId) to avoid identical-looking labels.
+                cname = child.get("name") or f"Device 0x{child.get('rloc16', 0):04x}"
                 lines.append(f"{branch} {cemoji} {cname}")
 
         if wifi_matter:
