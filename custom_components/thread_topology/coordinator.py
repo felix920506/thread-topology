@@ -643,27 +643,15 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _identify_router(
         self,
         ext_address: str,
-        is_self: bool,
         router_index: int,
         matter_name: str | None = None,
     ) -> dict[str, str]:
         """Identify a router by its extended address or characteristics.
 
-        ``is_self`` marks the OTBR node this integration is talking to (the Home
-        Assistant Thread radio), which is not necessarily the network leader.
         ``matter_name`` is the Home Assistant device name when this router is a
         known Matter device (matched by extended address).
         """
         ext_normalized = _normalize_address(ext_address)
-
-        # The queried OTBR node is the Home Assistant border router itself
-        if is_self:
-            return {
-                "name": "Home Assistant OTBR",
-                "manufacturer": "Nabu Casa",
-                "type": "border_router",
-                "icon": "home-assistant",
-            }
 
         # Check custom routers first (user-defined in custom_routers.yaml)
         for custom in self._custom_routers:
@@ -825,9 +813,13 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 leader_ext_address = ext_address
             role = "leader" if is_leader else "router"
 
-            is_self = norm_ext == self_ext and bool(self_ext)
+            # The node behind /api/node is the border router this integration is
+            # connected to. It is NOT necessarily the Home Assistant radio (the
+            # HA OTBR build doesn't expose the full /api/* diagnostics, so a
+            # separate OTBR is usually queried), so just flag it, don't name it.
+            is_queried_otbr = norm_ext == self_ext and bool(self_ext)
             router_info = self._identify_router(
-                ext_address, is_self, router_index, matter_by_ext.get(norm_ext)
+                ext_address, router_index, matter_by_ext.get(norm_ext)
             )
             router_index += 1
 
@@ -901,6 +893,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "ext_address": ext_address,
                 "rloc16": rloc_int,
                 "role": role,
+                "is_otbr": is_queried_otbr,
                 "name": router_info["name"],
                 "manufacturer": router_info["manufacturer"],
                 "device_type": router_info["type"],
@@ -972,10 +965,12 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             role_label = "Leader" if role == "leader" else "Router"
             lq_value = node.get("link_quality")
             lq = lq_text[min(lq_value, 3)] if isinstance(lq_value, int) else "Unknown"
+            # Mark the border router this integration is connected to
+            otbr_tag = "  ·  \U0001f310 connected OTBR" if node.get("is_otbr") else ""
             lines.append("")
             lines.append(
                 f"{emoji} {node.get('name', 'Router')}  ·  {role_label}  ·  "
-                f"LQ {lq}"
+                f"LQ {lq}{otbr_tag}"
             )
             children = node.get("children", [])
             for i, child in enumerate(children):

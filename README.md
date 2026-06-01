@@ -28,7 +28,7 @@ A Home Assistant custom integration that visualizes your Thread network topology
 ## Features
 
 - **Visual Topology Map**: See your entire Thread network structure in a markdown card
-- **Device Identification**: Identifies the Home Assistant OTBR radio and known border routers (Eero, Apple, Google, …) by OUI
+- **Device Identification**: Names routers from your Home Assistant Matter devices or by OUI, and flags the OTBR it's connected to
 - **Matter Integration**: Links Thread devices with their Matter device names from Home Assistant
 - **Link Quality Indicators**: Visual representation of connection quality (Poor/Fair/Good/Excellent)
 - **WiFi vs Thread**: Separates Matter devices by transport type
@@ -40,24 +40,25 @@ A Home Assistant custom integration that visualizes your Thread network topology
 🧵 ha-thread-bac3   (3 routers · 11 devices)
 
 👑 Thread Router (F228)  ·  Leader  ·  LQ Excellent
-├─ 💤 Device 6
-└─ 💤 Device 15
+├─ 💤 Device 0x1c06
+└─ 💤 Device 0x1c0f
 
-📡 Home Assistant OTBR  ·  Router  ·  LQ Excellent
-├─ 💤 Device 1
-└─ 💤 Device 2
+📡 Thread Router (E9DA)  ·  Router  ·  LQ Excellent  ·  🌐 connected OTBR
+├─ 💤 Device 0x3c01
+└─ 💤 Device 0x3c02
 
 📡 Thread Router (D773)  ·  Router  ·  LQ Excellent
-├─ 💤 Device 1
-└─ 💤 Device 2
+├─ 💤 Device 0xf401
+└─ 💤 Device 0xf402
 
 📶 Matter over WiFi
 • Smart Lock (Nuki)
 • WiFi Smart Switch (SONOFF)
 ```
 
-> Routers are named from their address OUI (or `custom_routers.yaml`); end
-> devices appear as `Device <id>` because the OTBR API does not expose a child's
+> Routers are named from a matched Home Assistant Matter device, the address OUI,
+> or `custom_routers.yaml`; end devices appear as `Device 0x<rloc16>` because the
+> OTBR API does not expose a child's
 > address to map it to a friendly name.
 
 ## Requirements
@@ -128,7 +129,7 @@ For more complete examples including stats tiles, see the [examples/lovelace-car
 ## Supported Border Routers
 
 The integration automatically identifies:
-- **This Home Assistant OTBR radio** (the node it queries)
+- **The OTBR it connects to** (flagged as the "connected OTBR")
 - **Amazon Eero** mesh routers
 - **Apple HomePod** / HomePod Mini
 - **Google Nest** Hub / WiFi
@@ -143,12 +144,13 @@ The integration automatically identifies:
 Routers are identified using the **OUI prefix** (first 3 bytes) of their Thread extended address. For example, a device with extended address `AABAD11C1D3AF27F` has OUI `AA:BA:D1`.
 
 The integration checks in this order:
-1. **This OTBR** — the radio this integration queries is labeled "Home Assistant OTBR"
-2. **Custom routers** — user-defined in `custom_routers.yaml` (see below)
-3. **Home Assistant Matter name** — matched by Thread extended address (so a Matter router shows its HA device name)
-4. **Built-in OUI table** — ~30 known manufacturer prefixes
-5. **Pattern matching** — substring patterns for specific devices
-6. **Neutral fallback** — `Thread Router (XXXX)`, where `XXXX` is the last 4 hex of the extended address (assign a real name via `custom_routers.yaml`)
+1. **Custom routers** — user-defined in `custom_routers.yaml` (see below)
+2. **Home Assistant Matter name** — matched by Thread extended address (so a Matter router shows its HA device name)
+3. **Built-in OUI table** — ~30 known manufacturer prefixes
+4. **Pattern matching** — substring patterns for specific devices
+5. **Neutral fallback** — `Thread Router (XXXX)`, where `XXXX` is the last 4 hex of the extended address (assign a real name via `custom_routers.yaml`)
+
+The border router the integration is pointed at is flagged as the **connected OTBR** in the diagram. (It is whatever OTBR you configured — not assumed to be the Home Assistant one, since the HA OTBR build does not expose the full `/api/*` diagnostics this integration needs.)
 
 ### Custom Border Router Configuration
 
