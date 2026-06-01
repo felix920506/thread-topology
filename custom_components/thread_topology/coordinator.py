@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from datetime import timedelta
@@ -261,45 +262,76 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _get_json(self, endpoint: str) -> Any:
         """GET a JSON:API resource from the OTBR REST API."""
         url = f"{self.otbr_url}{endpoint}"
+        headers = {"Accept": API_MEDIA_TYPE}
         async with self._session.get(
             url,
-            headers={"Accept": API_MEDIA_TYPE},
+            headers=headers,
             timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
         ) as response:
-            await self._raise_for_status(response, "GET", url)
+            await self._raise_for_status(response, "GET", url, headers, None)
             return await response.json()
 
     async def _post_actions(self, tasks: list[dict[str, Any]]) -> Any:
         """POST one or more tasks to the actions queue and return the response."""
         url = f"{self.otbr_url}{ENDPOINT_ACTIONS}"
+        headers = {
+            "Accept": API_MEDIA_TYPE,
+            "Content-Type": API_MEDIA_TYPE,
+        }
+        body = {"data": tasks}
         async with self._session.post(
             url,
-            json={"data": tasks},
-            headers={
-                "Accept": API_MEDIA_TYPE,
-                "Content-Type": API_MEDIA_TYPE,
-            },
+            json=body,
+            headers=headers,
             timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
         ) as response:
-            await self._raise_for_status(response, "POST", url)
+            await self._raise_for_status(response, "POST", url, headers, body)
             return await response.json()
 
     @staticmethod
     async def _raise_for_status(
-        response: aiohttp.ClientResponse, method: str, url: str
+        response: aiohttp.ClientResponse,
+        method: str,
+        url: str,
+        request_headers: dict[str, str] | None,
+        request_body: Any,
     ) -> None:
-        """Raise for HTTP errors, logging the response body for diagnostics.
+        """Raise for HTTP errors, logging the full request and response.
 
         OTBR returns JSON:API error details (e.g. which task attribute was
-        rejected on a 422) in the body, which ``raise_for_status`` discards.
+        rejected on a 422) in the body, which ``raise_for_status`` discards. On
+        any 4xx/5xx the entire exchange is logged at WARNING level to make
+        troubleshooting straightforward.
         """
         if response.status >= 400:
             try:
-                body = await response.text()
+                response_body = await response.text()
             except Exception:  # noqa: BLE001 - best-effort diagnostics only
-                body = "<unreadable response body>"
-            _LOGGER.error(
-                "OTBR %s %s -> HTTP %s: %s", method, url, response.status, body[:1000]
+                response_body = "<unreadable response body>"
+            try:
+                request_body_str = (
+                    json.dumps(request_body) if request_body is not None else "<none>"
+                )
+            except (TypeError, ValueError):
+                request_body_str = repr(request_body)
+            _LOGGER.warning(
+                "OTBR request failed:\n"
+                "--- REQUEST ---\n"
+                "%s %s\n"
+                "Headers: %s\n"
+                "Body: %s\n"
+                "--- RESPONSE ---\n"
+                "HTTP %s %s\n"
+                "Headers: %s\n"
+                "Body: %s",
+                method,
+                url,
+                request_headers or {},
+                request_body_str,
+                response.status,
+                response.reason or "",
+                dict(response.headers),
+                response_body,
             )
         response.raise_for_status()
 
