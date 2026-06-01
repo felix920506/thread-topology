@@ -28,7 +28,6 @@ from .const import (
     DISCOVERY_MAX_RETRIES,
     DOMAIN,
     ENDPOINT_ACTIONS,
-    ENDPOINT_DEVICES,
     ENDPOINT_DIAGNOSTICS,
     ENDPOINT_NODE,
     REQUEST_TIMEOUT,
@@ -125,6 +124,23 @@ def _is_truthy(value: Any) -> bool:
     return bool(value)
 
 
+def _parse_rloc16(value: Any) -> int | None:
+    """Parse an rloc16 to int. The API returns it as a hex string (``"0x3c00"``)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return int(text, 16) if text.lower().startswith("0x") else int(text)
+        except ValueError:
+            return None
+    return None
+
+
 class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator to fetch Thread topology data from OTBR."""
 
@@ -192,11 +208,13 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from OTBR API.
 
-        The new OTBR REST layout no longer exposes a single ``GET /diagnostics``
-        endpoint. Instead it is an asynchronous task queue: discover the network
-        (``updateDeviceCollectionTask``), read the device collection, then request
-        per-router network diagnostics (``getNetworkDiagnosticTask``) and read the
-        results from the diagnostics collection.
+        The new OTBR REST layout is an asynchronous task queue:
+
+        1. ``GET /api/node`` for node/leader info.
+        2. ``updateDeviceCollectionTask`` to discover/refresh the network.
+        3. Per-router ``getNetworkDiagnosticTask`` queries (addressed by rloc16)
+           to refresh the mesh diagnostics, then read the ``/api/diagnostics``
+           collection (the per-router route table and child table live there).
         """
         try:
             if self._session is None:
@@ -206,38 +224,21 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._router_index = 0
 
             # 1. Node / leader info
-            node = await self._get_json(ENDPOINT_NODE)
-            node_attrs = self._resource_attributes(node)
+            node_attrs = self._resource_attributes(await self._get_json(ENDPOINT_NODE))
 
-            # 2. Discover the network so the device collection is fresh.
-            # All four attributes are required by updateDeviceCollectionTask.
-            await self._run_actions(
-                [
-                    {
-                        "type": TASK_UPDATE_DEVICES,
-                        "attributes": {
-                            "maxAge": DISCOVERY_MAX_AGE,
-                            "maxRetries": DISCOVERY_MAX_RETRIES,
-                            "deviceCount": DISCOVERY_DEVICE_COUNT,
-                            "timeout": ACTION_TIMEOUT,
-                        },
-                    }
-                ]
-            )
+            # 2. Discover the network so the collections are fresh (best effort).
+            await self._refresh_device_collection()
 
-            # 3. Read the device collection
-            devices = self._resource_list(await self._get_json(ENDPOINT_DEVICES))
-
-            # 4. Request per-router diagnostics (full mesh) in a single batch
-            diagnostics_by_addr = await self._fetch_diagnostics(devices)
+            # 3. Refresh + read per-router diagnostics
+            diagnostics = await self._fetch_diagnostics(node_attrs)
 
             # Get Matter devices and Thread Border Routers from HA device registry
             matter_devices = self._get_matter_devices()
             thread_routers = self._get_thread_border_routers()
 
-            # 5. Process and combine data
+            # 4. Process and combine data
             topology = self._process_topology(
-                node_attrs, devices, diagnostics_by_addr, matter_devices, thread_routers
+                node_attrs, diagnostics, matter_devices, thread_routers
             )
 
             # Generate and save SVG to www folder
@@ -335,95 +336,144 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         response.raise_for_status()
 
-    async def _run_actions(self, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Enqueue tasks and poll them until each reaches a terminal status.
+    async def _refresh_device_collection(self) -> None:
+        """Trigger network discovery so the device/diagnostics collections refresh.
 
-        Returns the completed action items (each may carry a ``diagnostics``
-        relationship pointing at an entry in the diagnostics collection).
+        Best effort: a failure here should not abort the whole update because the
+        collections retain their last-known contents.
         """
-        enqueued = self._resource_list(await self._post_actions(tasks))
-        action_ids = [item.get("id") for item in enqueued if item.get("id")]
-        if not action_ids:
-            return []
+        try:
+            await self._run_action(
+                {
+                    "type": TASK_UPDATE_DEVICES,
+                    "attributes": {
+                        "maxAge": DISCOVERY_MAX_AGE,
+                        "maxRetries": DISCOVERY_MAX_RETRIES,
+                        "deviceCount": DISCOVERY_DEVICE_COUNT,
+                        "timeout": ACTION_TIMEOUT,
+                    },
+                }
+            )
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("OTBR device discovery failed: %s", err)
 
-        results: list[dict[str, Any]] = []
+    async def _fetch_diagnostics(
+        self, node_attrs: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Refresh and return the per-router network diagnostics collection.
+
+        ``getNetworkDiagnosticTask`` only accepts an rloc16 destination on this
+        OTBR build (an extAddress/deviceId destination returns 422). The router
+        rloc16 set is derived from the current diagnostics collection plus the
+        node's own rloc16 and the leader, a refresh is requested for each (best
+        effort), and the refreshed ``/api/diagnostics`` collection is returned.
+        """
+        diagnostics = self._resource_list(await self._get_json(ENDPOINT_DIAGNOSTICS))
+        rlocs = self._router_rlocs(node_attrs, diagnostics)
+
+        action_ids: list[str] = []
+        for rloc in rlocs:
+            task = {
+                "type": TASK_GET_DIAGNOSTIC,
+                "attributes": {
+                    "destination": f"0x{rloc:04x}",
+                    "types": DIAGNOSTIC_TLV_TYPES,
+                    "timeout": ACTION_TIMEOUT,
+                },
+            }
+            try:
+                action_id = await self._enqueue_action(task)
+            except aiohttp.ClientError as err:
+                _LOGGER.warning(
+                    "Diagnostic request for 0x%04x failed, skipping: %s", rloc, err
+                )
+                continue
+            if action_id:
+                action_ids.append(action_id)
+
+        if action_ids:
+            await self._await_actions(action_ids)
+            diagnostics = self._resource_list(
+                await self._get_json(ENDPOINT_DIAGNOSTICS)
+            )
+
+        return diagnostics
+
+    @staticmethod
+    def _router_rlocs(
+        node_attrs: dict[str, Any], diagnostics: list[dict[str, Any]]
+    ) -> list[int]:
+        """Derive the set of router rloc16 values to query for diagnostics.
+
+        A router's rloc16 is ``routerId << 10`` (child bits zeroed). Candidates
+        come from the node's own rloc16, the leader (``leaderRouterId``), and
+        every router referenced by an existing diagnostic entry or its route
+        table, so a single populated entry seeds the whole router set.
+        """
+        rlocs: set[int] = set()
+
+        own = _parse_rloc16(_first(node_attrs, "rloc16", default=None))
+        if own is not None:
+            rlocs.add(own & 0xFC00)
+
+        leader_data = node_attrs.get("leaderData", {}) or {}
+        leader_rid = _first(leader_data, "leaderRouterId", default=None)
+        if isinstance(leader_rid, int):
+            rlocs.add((leader_rid << 10) & 0xFFFF)
+
+        for diag in diagnostics:
+            attrs = diag.get("attributes", {})
+            r = _parse_rloc16(_first(attrs, "rloc16", default=None))
+            if r is not None:
+                rlocs.add(r & 0xFC00)
+            route = _first(attrs, "route", "route64", default={}) or {}
+            for rd in _first(route, "routeData", "routes", default=[]) or []:
+                rid = _first(rd, "routeId", "routerId", default=None)
+                if isinstance(rid, int):
+                    rlocs.add((rid << 10) & 0xFFFF)
+
+        return sorted(rlocs)
+
+    async def _enqueue_action(self, task: dict[str, Any]) -> str | None:
+        """POST a single task to the actions queue and return its action id."""
+        enqueued = self._resource_list(await self._post_actions([task]))
+        for item in enqueued:
+            if item.get("id"):
+                return item["id"]
+        return None
+
+    async def _run_action(self, task: dict[str, Any]) -> None:
+        """Enqueue a single task and wait for it to reach a terminal status."""
+        action_id = await self._enqueue_action(task)
+        if action_id:
+            await self._await_actions([action_id])
+
+    async def _await_actions(self, action_ids: list[str]) -> None:
+        """Poll the given actions until each reaches a terminal status."""
         deadline = asyncio.get_event_loop().time() + ACTION_TIMEOUT + 5
         pending = set(action_ids)
 
         while pending and asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(ACTION_POLL_INTERVAL)
             for action_id in list(pending):
-                item = self._resource_attributes(
-                    await self._get_json(f"{ENDPOINT_ACTIONS}/{action_id}"),
-                    raw=True,
-                )
-                status = str(_first(item.get("attributes", {}), "status", default="")).lower()
+                try:
+                    item = self._resource_attributes(
+                        await self._get_json(f"{ENDPOINT_ACTIONS}/{action_id}"),
+                        raw=True,
+                    )
+                except aiohttp.ClientError:
+                    pending.discard(action_id)
+                    continue
+                status = str(
+                    _first(item.get("attributes", {}), "status", default="")
+                ).lower()
                 if status in ACTION_TERMINAL_STATUSES:
                     pending.discard(action_id)
-                    results.append(item)
 
         if pending:
             _LOGGER.warning(
                 "Timed out waiting for %d OTBR action(s) to complete", len(pending)
             )
-        return results
-
-    async def _fetch_diagnostics(
-        self, devices: list[dict[str, Any]]
-    ) -> dict[str, dict[str, Any]]:
-        """Run getNetworkDiagnosticTask for every router and collect the results.
-
-        Returns a mapping of normalized extended address -> diagnostic attributes.
-        """
-        # Run one task per POST. Some OTBR builds reject a multi-task batch with
-        # a generic 422, and one bad destination should not abort the whole
-        # update, so each router is requested independently and failures are
-        # logged and skipped.
-        completed: list[dict[str, Any]] = []
-        for device in devices:
-            attrs = device.get("attributes", {})
-            role = str(_first(attrs, "role", default="")).lower()
-            if role not in ("leader", "router"):
-                continue
-            destination = device.get("id") or _first(attrs, "extAddress", "extaddress")
-            if not destination:
-                continue
-            task = {
-                "type": TASK_GET_DIAGNOSTIC,
-                "attributes": {
-                    "destination": destination,
-                    "types": DIAGNOSTIC_TLV_TYPES,
-                    "timeout": ACTION_TIMEOUT,
-                },
-            }
-            try:
-                completed.extend(await self._run_actions([task]))
-            except aiohttp.ClientError as err:
-                _LOGGER.warning(
-                    "Diagnostic request for %s failed, skipping: %s", destination, err
-                )
-
-        if not completed:
-            return {}
-
-        # Resolve each completed action's diagnostics relationship to a result.
-        diagnostics_by_addr: dict[str, dict[str, Any]] = {}
-        for action in completed:
-            diag_id = self._relationship_id(action, "diagnostics")
-            if not diag_id:
-                continue
-            try:
-                diag_attrs = self._resource_attributes(
-                    await self._get_json(f"{ENDPOINT_DIAGNOSTICS}/{diag_id}")
-                )
-            except aiohttp.ClientError as err:
-                _LOGGER.debug("Could not fetch diagnostic %s: %s", diag_id, err)
-                continue
-            ext = _first(diag_attrs, "extAddress", "extaddress", default="")
-            if ext:
-                diagnostics_by_addr[_normalize_address(ext)] = diag_attrs
-
-        return diagnostics_by_addr
 
     @staticmethod
     def _resource_list(payload: Any) -> list[dict[str, Any]]:
@@ -455,19 +505,6 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return resource
         attributes = resource.get("attributes")
         return attributes if isinstance(attributes, dict) else resource
-
-    @staticmethod
-    def _relationship_id(resource: dict[str, Any], name: str) -> str | None:
-        """Extract a related resource id from a JSON:API ``relationships`` block."""
-        rel = resource.get("relationships", {})
-        if not isinstance(rel, dict):
-            return None
-        data = rel.get(name, {}).get("data") if isinstance(rel.get(name), dict) else None
-        if isinstance(data, dict):
-            return data.get("id")
-        if isinstance(data, list) and data:
-            return data[0].get("id")
-        return None
 
     def _get_matter_devices(self) -> list[dict[str, Any]]:
         """Get Matter devices from Home Assistant device registry."""
@@ -622,86 +659,89 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _process_topology(
         self,
         node_attrs: dict,
-        devices: list[dict],
-        diagnostics_by_addr: dict[str, dict],
+        diagnostics: list[dict],
         matter_devices: list[dict],
         thread_routers: list[dict],
     ) -> dict[str, Any]:
-        """Process OTBR data (node + device collection + diagnostics) into topology.
+        """Process OTBR data (node + diagnostics collection) into topology.
 
-        ``devices`` are JSON:API device resources from ``/api/devices`` and
-        ``diagnostics_by_addr`` maps a normalized extended address to the
-        diagnostic attributes returned by ``getNetworkDiagnosticTask``.
+        ``diagnostics`` are the JSON:API resources from ``/api/diagnostics``;
+        each describes one router (its ``route`` table and ``childTable``). The
+        leader is the router whose ``routerId`` equals the node's
+        ``leaderData.leaderRouterId`` (the queried node is not necessarily the
+        leader). The internal topology dict is unchanged so the SVG generator and
+        sensors are unaffected.
         """
-        # Get leader info from the node resource attributes
-        leader_ext_address = _first(node_attrs, "extAddress", "extaddress", default="")
-        leader_ext_normalized = _normalize_address(leader_ext_address)
         network_name = _first(node_attrs, "networkName", "networkname", default="Unknown")
         num_routers = _first(
-            node_attrs, "numOfRouter", "numberOfRouters", "routerCount", default=0
+            node_attrs, "routerCount", "numOfRouter", "numberOfRouters", default=0
         )
         state = _first(node_attrs, "state", default="unknown")
+        leader_data = node_attrs.get("leaderData", {}) or {}
+        leader_router_id = _first(leader_data, "leaderRouterId", default=None)
 
         # Separate Thread and WiFi Matter devices
         thread_matter = [d for d in matter_devices if d["transport"] == "thread"]
         wifi_matter = [d for d in matter_devices if d["transport"] == "wifi"]
 
-        # Build nodes dictionary (only routers/leader become nodes; children come
-        # from each router's ChildTable, mirroring the old per-router diagnostics)
+        def _router_id(attrs: dict, rloc_int: int) -> int:
+            rid = _first(attrs, "routerId", default=None)
+            return rid if isinstance(rid, int) else rloc_int >> 10
+
+        # Sort leader first, then by rloc16, for stable router numbering
+        def _sort_key(diag: dict) -> tuple[int, int]:
+            attrs = diag.get("attributes", {})
+            rloc_int = _parse_rloc16(_first(attrs, "rloc16", default=0)) or 0
+            rid = _router_id(attrs, rloc_int)
+            return (0 if rid == leader_router_id else 1, rloc_int)
+
         nodes: dict[str, dict] = {}
         thread_device_idx = 0
         router_index = 0
+        leader_ext_address = ""
 
-        for device in devices:
-            attrs = device.get("attributes", {})
-            ext_address = device.get("id") or _first(
-                attrs, "extAddress", "extaddress", default=""
+        for diag in sorted(diagnostics, key=_sort_key):
+            attrs = diag.get("attributes", {})
+            ext_address = _first(attrs, "extAddress", "extaddress", default="") or diag.get(
+                "id", ""
             )
             if not ext_address:
                 continue
 
-            ext_normalized = _normalize_address(ext_address)
-            rloc16 = _first(attrs, "rloc16", default=0)
-
-            # Determine device role from the device collection
-            role_raw = str(_first(attrs, "role", default="")).lower()
-            is_leader = ext_normalized == leader_ext_normalized or "leader" in role_raw
-            is_router = is_leader or "router" in role_raw
-
-            # Children attach to their router via the ChildTable, so skip
-            # non-router devices as standalone nodes.
-            if not is_router:
-                continue
-
+            rloc_int = _parse_rloc16(_first(attrs, "rloc16", default=0)) or 0
+            router_id = _router_id(attrs, rloc_int)
+            is_leader = leader_router_id is not None and router_id == leader_router_id
+            if is_leader:
+                leader_ext_address = ext_address
             role = "leader" if is_leader else "router"
-
-            # Per-router diagnostics (may be empty if the query timed out)
-            diag = diagnostics_by_addr.get(ext_normalized, {})
 
             # Get router identification
             router_info = self._identify_router(ext_address, is_leader, router_index)
             router_index += 1
 
-            # Get connectivity info from diagnostics
-            connectivity = _first(diag, "connectivity", default={}) or {}
+            # Route table (the build names this TLV "route"; "route64" on others)
+            route = _first(attrs, "route", "route64", default={}) or {}
+            route_data = _first(route, "routeData", "routes", default=[]) or []
+
+            # Link quality: prefer a connectivity TLV when present, otherwise
+            # derive it from the best inbound link to a neighbouring router.
+            connectivity = _first(attrs, "connectivity", default={}) or {}
             leader_cost = _first(connectivity, "leaderCost", default=0)
-
-            # Get best link quality (3 = best, 0 = none)
-            lq3 = _first(connectivity, "linkQuality3", default=0)
-            lq2 = _first(connectivity, "linkQuality2", default=0)
-            lq1 = _first(connectivity, "linkQuality1", default=0)
-
-            if lq3 > 0:
-                link_quality = 3
-            elif lq2 > 0:
-                link_quality = 2
-            elif lq1 > 0:
-                link_quality = 1
+            if connectivity:
+                lq3 = _first(connectivity, "linkQuality3", default=0)
+                lq2 = _first(connectivity, "linkQuality2", default=0)
+                lq1 = _first(connectivity, "linkQuality1", default=0)
+                link_quality = 3 if lq3 > 0 else 2 if lq2 > 0 else 1 if lq1 > 0 else 0
             else:
-                link_quality = 0
+                neighbour_lq = [
+                    _first(rd, "linkQualityIn", default=0)
+                    for rd in route_data
+                    if _first(rd, "routeId", "routerId", default=None) != router_id
+                ]
+                link_quality = min(max(neighbour_lq), 3) if neighbour_lq else 0
 
             # Get children and try to match with Matter devices
-            child_table = _first(diag, "childTable", default=[]) or []
+            child_table = _first(attrs, "childTable", default=[]) or []
             children = []
             for child in child_table:
                 child_id = _first(child, "childId", default=0)
@@ -715,11 +755,17 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     matter_match = thread_matter[thread_device_idx]
                     thread_device_idx += 1
 
+                # A child's rloc16 is the parent router rloc16 with the child id
+                # in the low bits.
+                child_rloc = _parse_rloc16(_first(child, "rloc16", default=None))
+                if child_rloc is None:
+                    child_rloc = (rloc_int & 0xFC00) | child_id
+
                 child_info = {
                     "id": child_id,
                     "type": child_type,
                     "timeout": _first(child, "timeout", default=0),
-                    "rloc16": _first(child, "rloc16", default=rloc16 + child_id),
+                    "rloc16": child_rloc,
                 }
 
                 if matter_match:
@@ -729,14 +775,15 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 children.append(child_info)
 
-            # Get route data for mesh connections (route64 TLV)
-            route = _first(diag, "route64", default={}) or {}
-            route_data = _first(route, "routeData", "routes", default=[]) or []
+            # Mesh connections from the route table (skip the self entry)
             connections = []
             for rd in route_data:
+                rid = _first(rd, "routeId", "routerId", default=None)
+                if rid is None or rid == router_id:
+                    continue
                 if _first(rd, "routeCost", default=255) < 255:
                     connections.append({
-                        "router_id": _first(rd, "routerId", default=0),
+                        "router_id": rid,
                         "lq_out": _first(rd, "linkQualityOut", default=0),
                         "lq_in": _first(rd, "linkQualityIn", default=0),
                         "cost": _first(rd, "routeCost", default=0),
@@ -744,7 +791,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             nodes[ext_address] = {
                 "ext_address": ext_address,
-                "rloc16": rloc16,
+                "rloc16": rloc_int,
                 "role": role,
                 "name": router_info["name"],
                 "manufacturer": router_info["manufacturer"],
@@ -756,7 +803,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "child_count": len(children),
                 "connections": connections,
                 "ip_addresses": _first(
-                    diag, "ipv6AddressList", "ipv6Addresses", default=[]
+                    attrs, "ipv6AddressList", "ipv6Addresses", default=[]
                 ) or [],
             }
 

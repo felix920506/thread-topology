@@ -19,15 +19,15 @@ TASK_UPDATE_DEVICES = "updateDeviceCollectionTask"
 TASK_GET_DIAGNOSTIC = "getNetworkDiagnosticTask"
 
 # Diagnostic TLV types requested per router to build the mesh topology.
-# Kept to the classic, widely-supported TLVs that the topology builder actually
-# consumes (newer TLVs such as childIpv6Addresses can trigger a 422 on some
-# OTBR builds and are not used here).
+# NOTE: the route table TLV is named "route" on the OTBR REST API (the standard
+# "route64" name is rejected with a 422). Only the TLVs the topology builder
+# actually consumes are requested.
 DIAGNOSTIC_TLV_TYPES = [
     "extAddress",
     "rloc16",
     "mode",
     "connectivity",
-    "route64",
+    "route",
     "leaderData",
     "childTable",
 ]

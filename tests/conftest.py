@@ -42,167 +42,111 @@ _uc.UpdateFailed = _FakeUpdateFailed
 
 @pytest.fixture
 def mock_otbr_node_response() -> dict:
-    """Return a mock OTBR ``GET /api/node`` response (JSON:API, camelCase)."""
+    """Return a mock OTBR ``GET /api/node`` response (JSON:API, camelCase).
+
+    Mirrors a real response: the queried node is a *router* (not the leader);
+    ``rloc16`` is a hex string and the leader is identified via
+    ``leaderData.leaderRouterId``.
+    """
     return {
         "data": {
             "type": "threadBorderRouter",
-            "id": "1EA5312CFB153F0B",
+            "id": "7690F04AB3B4E9DA",
             "attributes": {
-                "baId": "175B0E832E7217C5C5A630B547C044E4",
-                "state": "leader",
-                "numOfRouter": 3,
-                "rlocAddress": "fd2a:398d:f276:6b9c:0:ff:fe00:d800",
-                "extAddress": "1EA5312CFB153F0B",
+                "extAddress": "7690F04AB3B4E9DA",
+                "role": "router",
+                "state": "router",
+                "routerId": 15,
+                "rloc16": "0x3c00",
+                "routerCount": 3,
                 "networkName": "MyHome1038137341",
-                "rloc16": 55296,
                 "leaderData": {
-                    "partitionId": 1055464771,
+                    "partitionId": 1425094364,
                     "weighting": 64,
-                    "dataVersion": 126,
-                    "stableDataVersion": 159,
-                    "leaderRouterId": 54,
+                    "dataVersion": 66,
+                    "stableDataVersion": 136,
+                    "leaderRouterId": 7,
                 },
-                "extPanId": "78ACC8F0AE5249C5",
+                "extPanId": "F56C3C34E80C9EA2",
             },
         }
     }
 
 
 @pytest.fixture
-def mock_otbr_devices_response() -> dict:
-    """Return a mock OTBR ``GET /api/devices`` collection (JSON:API)."""
+def mock_otbr_diagnostics_response() -> dict:
+    """Return a mock OTBR ``GET /api/diagnostics`` collection (JSON:API).
+
+    Three routers; router id 7 is the leader (matches leaderRouterId). The route
+    table TLV is named ``route`` and ``rloc16`` is a hex string, as on the live
+    API. Children come from each router's ``childTable``.
+    """
     return {
         "data": [
             {
-                "type": "threadBorderRouter",
-                "id": "1EA5312CFB153F0B",
+                "type": "networkDiagnostics",
+                "id": "diag-1",
                 "attributes": {
-                    "extAddress": "1EA5312CFB153F0B",
-                    "rloc16": 55296,
-                    "role": "leader",
+                    "extAddress": "228942D83C99F228",
+                    "rloc16": "0x1c00",
+                    "routerId": 7,
+                    "route": {
+                        "routeData": [
+                            {"routeId": 7, "linkQualityIn": 0, "linkQualityOut": 0, "routeCost": 1},
+                            {"routeId": 15, "linkQualityIn": 3, "linkQualityOut": 3, "routeCost": 1},
+                            {"routeId": 61, "linkQualityIn": 3, "linkQualityOut": 3, "routeCost": 1},
+                        ]
+                    },
+                    "childTable": [
+                        {"childId": 6, "timeout": 12, "linkQuality": 3,
+                         "mode": {"rxOnWhenIdle": False, "deviceTypeFTD": False}},
+                        {"childId": 15, "timeout": 12, "linkQuality": 2,
+                         "mode": {"rxOnWhenIdle": True, "deviceTypeFTD": False}},
+                    ],
                 },
             },
             {
-                "type": "threadDevice",
-                "id": "96308C2577D6EA17",
+                "type": "networkDiagnostics",
+                "id": "diag-2",
                 "attributes": {
-                    "extAddress": "96308C2577D6EA17",
-                    "rloc16": 8192,
-                    "role": "router",
+                    "extAddress": "7690F04AB3B4E9DA",
+                    "rloc16": "0x3c00",
+                    "routerId": 15,
+                    "route": {
+                        "routeData": [
+                            {"routeId": 7, "linkQualityIn": 3, "linkQualityOut": 3, "routeCost": 1},
+                            {"routeId": 15, "linkQualityIn": 0, "linkQualityOut": 0, "routeCost": 1},
+                            {"routeId": 61, "linkQualityIn": 3, "linkQualityOut": 3, "routeCost": 1},
+                        ]
+                    },
+                    "childTable": [
+                        {"childId": 1, "timeout": 12, "linkQuality": 3,
+                         "mode": {"rxOnWhenIdle": False, "deviceTypeFTD": False}},
+                    ],
                 },
             },
             {
-                "type": "threadDevice",
-                "id": "A4B3C2D1E0F09876",
+                "type": "networkDiagnostics",
+                "id": "diag-3",
                 "attributes": {
-                    "extAddress": "A4B3C2D1E0F09876",
-                    "rloc16": 16384,
-                    "role": "router",
+                    "extAddress": "4E6BC0581D23D773",
+                    "rloc16": "0xf400",
+                    "routerId": 61,
+                    "route": {
+                        "routeData": [
+                            {"routeId": 7, "linkQualityIn": 3, "linkQualityOut": 3, "routeCost": 1},
+                            {"routeId": 15, "linkQualityIn": 3, "linkQualityOut": 3, "routeCost": 1},
+                            {"routeId": 61, "linkQualityIn": 0, "linkQualityOut": 0, "routeCost": 1},
+                        ]
+                    },
+                    "childTable": [
+                        {"childId": 2, "timeout": 12, "linkQuality": 3,
+                         "mode": {"rxOnWhenIdle": False, "deviceTypeFTD": False}},
+                    ],
                 },
             },
-            {
-                # A child device — must NOT become a standalone node.
-                "type": "threadDevice",
-                "id": "DEADBEEF00000001",
-                "attributes": {
-                    "extAddress": "DEADBEEF00000001",
-                    "rloc16": 8216,
-                    "role": "child",
-                },
-            },
-        ]
-    }
-
-
-@pytest.fixture
-def mock_diagnostics_by_addr() -> dict:
-    """Return mock per-router diagnostics keyed by normalized extended address.
-
-    This mirrors what ``_fetch_diagnostics`` produces after running
-    ``getNetworkDiagnosticTask`` for each router and reading ``/api/diagnostics``.
-    """
-    return {
-        "1EA5312CFB153F0B": {
-            "extAddress": "1EA5312CFB153F0B",
-            "rloc16": 55296,
-            "mode": {"rxOnWhenIdle": True, "deviceType": True, "networkData": True},
-            "connectivity": {
-                "linkQuality3": 1,
-                "linkQuality2": 0,
-                "linkQuality1": 0,
-                "leaderCost": 0,
-            },
-            "route64": {
-                "routeData": [
-                    {"routerId": 2, "linkQualityIn": 3, "linkQualityOut": 3, "routeCost": 1},
-                ]
-            },
-            "childTable": [
-                {
-                    "childId": 9,
-                    "timeout": 12,
-                    "rloc16": 55305,
-                    "mode": {"rxOnWhenIdle": False, "deviceType": False, "networkData": False},
-                },
-            ],
-            "ipv6AddressList": ["fd2a:398d:f276:6b9c:0:ff:fe00:d800"],
-        },
-        "96308C2577D6EA17": {
-            "extAddress": "96308C2577D6EA17",
-            "rloc16": 8192,
-            "mode": {"rxOnWhenIdle": True, "deviceType": True, "networkData": True},
-            "connectivity": {
-                "linkQuality3": 1,
-                "linkQuality2": 0,
-                "linkQuality1": 0,
-                "leaderCost": 1,
-            },
-            "route64": {
-                "routeData": [
-                    {"routerId": 13, "linkQualityIn": 3, "linkQualityOut": 3, "routeCost": 1},
-                ]
-            },
-            "childTable": [
-                {
-                    "childId": 24,
-                    "timeout": 12,
-                    "rloc16": 8216,
-                    "mode": {"rxOnWhenIdle": False, "deviceType": False, "networkData": False},
-                },
-            ],
-            "ipv6AddressList": ["fd2a:398d:f276:6b9c:0:ff:fe00:2000"],
-        },
-        "A4B3C2D1E0F09876": {
-            "extAddress": "A4B3C2D1E0F09876",
-            "rloc16": 16384,
-            "mode": {"rxOnWhenIdle": True, "deviceType": True, "networkData": True},
-            "connectivity": {
-                "linkQuality3": 1,
-                "linkQuality2": 0,
-                "linkQuality1": 0,
-                "leaderCost": 1,
-            },
-            "route64": {
-                "routeData": [
-                    {"routerId": 13, "linkQualityIn": 3, "linkQualityOut": 3, "routeCost": 1},
-                ]
-            },
-            "childTable": [
-                {
-                    "childId": 5,
-                    "timeout": 12,
-                    "rloc16": 16389,
-                    "mode": {"rxOnWhenIdle": False, "deviceType": False, "networkData": False},
-                },
-                {
-                    "childId": 8,
-                    "timeout": 12,
-                    "rloc16": 16392,
-                    "mode": {"rxOnWhenIdle": True, "deviceType": False, "networkData": False},
-                },
-            ],
-            "ipv6AddressList": ["fd2a:398d:f276:6b9c:0:ff:fe00:4000"],
-        },
+        ],
+        "meta": {"collection": {"offset": 0, "limit": 200, "total": 3}},
     }
 
 

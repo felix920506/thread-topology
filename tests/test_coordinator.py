@@ -16,9 +16,14 @@ sys.modules.setdefault("homeassistant.helpers.update_coordinator", MagicMock())
 
 from custom_components.thread_topology.coordinator import (
     _normalize_address,
+    _parse_rloc16,
     KNOWN_BORDER_ROUTER_OUIS,
     ThreadTopologyCoordinator,
 )
+
+LEADER = "228942D83C99F228"  # routerId 7 == leaderRouterId
+ROUTER_A = "7690F04AB3B4E9DA"  # routerId 15 (the queried node)
+ROUTER_B = "4E6BC0581D23D773"  # routerId 61
 
 
 def _build_coordinator() -> ThreadTopologyCoordinator:
@@ -29,16 +34,15 @@ def _build_coordinator() -> ThreadTopologyCoordinator:
 @pytest.fixture
 def topology(
     mock_otbr_node_response,
-    mock_otbr_devices_response,
-    mock_diagnostics_by_addr,
+    mock_otbr_diagnostics_response,
     mock_matter_devices,
 ):
     """Run the real _process_topology over the JSON:API fixtures."""
     coordinator = _build_coordinator()
     node_attrs = ThreadTopologyCoordinator._resource_attributes(mock_otbr_node_response)
-    devices = ThreadTopologyCoordinator._resource_list(mock_otbr_devices_response)
+    diagnostics = ThreadTopologyCoordinator._resource_list(mock_otbr_diagnostics_response)
     return coordinator._process_topology(
-        node_attrs, devices, mock_diagnostics_by_addr, mock_matter_devices, []
+        node_attrs, diagnostics, mock_matter_devices, []
     )
 
 
@@ -48,34 +52,59 @@ class TestResourceHelpers:
     def test_resource_attributes_single(self, mock_otbr_node_response):
         attrs = ThreadTopologyCoordinator._resource_attributes(mock_otbr_node_response)
         assert attrs["networkName"] == "MyHome1038137341"
-        assert attrs["extAddress"] == "1EA5312CFB153F0B"
+        assert attrs["extAddress"] == ROUTER_A
 
     def test_resource_attributes_raw_keeps_relationships(self):
         payload = {
             "data": {
                 "id": "abc",
                 "attributes": {"status": "completed"},
-                "relationships": {"diagnostics": {"data": {"id": "diag-1"}}},
+                "relationships": {"result": {"data": {"type": "diagnostics", "id": ""}}},
             }
         }
         raw = ThreadTopologyCoordinator._resource_attributes(payload, raw=True)
         assert raw["id"] == "abc"
-        assert raw["relationships"]["diagnostics"]["data"]["id"] == "diag-1"
+        assert raw["attributes"]["status"] == "completed"
 
-    def test_resource_list_collection(self, mock_otbr_devices_response):
-        items = ThreadTopologyCoordinator._resource_list(mock_otbr_devices_response)
-        assert len(items) == 4
-        assert items[0]["id"] == "1EA5312CFB153F0B"
+    def test_resource_list_collection(self, mock_otbr_diagnostics_response):
+        items = ThreadTopologyCoordinator._resource_list(mock_otbr_diagnostics_response)
+        assert len(items) == 3
+        assert items[0]["id"] == "diag-1"
 
-    def test_relationship_id(self):
-        resource = {
-            "id": "action-1",
-            "relationships": {"diagnostics": {"data": {"type": "x", "id": "diag-42"}}},
-        }
-        assert ThreadTopologyCoordinator._relationship_id(resource, "diagnostics") == "diag-42"
 
-    def test_relationship_id_missing(self):
-        assert ThreadTopologyCoordinator._relationship_id({}, "diagnostics") is None
+class TestParseRloc16:
+    """Test cases for the rloc16 parser (the API returns hex strings)."""
+
+    def test_hex_string(self):
+        assert _parse_rloc16("0x3c00") == 0x3C00
+        assert _parse_rloc16("0x1c00") == 7168
+
+    def test_int_passthrough(self):
+        assert _parse_rloc16(8192) == 8192
+
+    def test_invalid(self):
+        assert _parse_rloc16("nope") is None
+        assert _parse_rloc16(None) is None
+        assert _parse_rloc16(True) is None
+
+
+class TestRouterRlocs:
+    """Test deriving the router rloc16 set to query for diagnostics."""
+
+    def test_derives_all_routers(
+        self, mock_otbr_node_response, mock_otbr_diagnostics_response
+    ):
+        node_attrs = ThreadTopologyCoordinator._resource_attributes(mock_otbr_node_response)
+        diagnostics = ThreadTopologyCoordinator._resource_list(mock_otbr_diagnostics_response)
+        rlocs = ThreadTopologyCoordinator._router_rlocs(node_attrs, diagnostics)
+        # routerIds 7, 15, 61 -> rloc16 0x1c00, 0x3c00, 0xf400
+        assert set(rlocs) == {0x1C00, 0x3C00, 0xF400}
+
+    def test_seeds_from_leader_when_diagnostics_empty(self, mock_otbr_node_response):
+        node_attrs = ThreadTopologyCoordinator._resource_attributes(mock_otbr_node_response)
+        rlocs = ThreadTopologyCoordinator._router_rlocs(node_attrs, [])
+        # own rloc16 (0x3c00) and leaderRouterId 7 (<<10 = 0x1c00)
+        assert set(rlocs) == {0x3C00, 0x1C00}
 
 
 class TestProcessTopology:
@@ -83,49 +112,52 @@ class TestProcessTopology:
 
     def test_network_metadata(self, topology):
         assert topology["network_name"] == "MyHome1038137341"
-        assert topology["state"] == "leader"
-        assert topology["leader_address"] == "1EA5312CFB153F0B"
         assert topology["router_count"] == 3
 
-    def test_only_routers_become_nodes(self, topology):
-        """The child device in the collection must not be a standalone node."""
+    def test_leader_is_router_with_matching_router_id(self, topology):
+        # The queried node is a router; the leader is identified via routerId.
+        assert topology["leader_address"] == LEADER
+        assert topology["nodes"][LEADER]["role"] == "leader"
+
+    def test_node_count(self, topology):
         assert len(topology["nodes"]) == 3
-        assert "DEADBEEF00000001" not in topology["nodes"]
 
     def test_total_devices(self, topology):
         # 3 routers + 4 children = 7
         assert topology["total_devices"] == 7
 
-    def test_leader_role_identified(self, topology):
-        leader = topology["nodes"]["1EA5312CFB153F0B"]
-        assert leader["role"] == "leader"
-        assert leader["leader_cost"] == 0
+    def test_router_roles(self, topology):
+        assert topology["nodes"][ROUTER_A]["role"] == "router"
+        assert topology["nodes"][ROUTER_B]["role"] == "router"
 
-    def test_router_role_identified(self, topology):
-        assert topology["nodes"]["96308C2577D6EA17"]["role"] == "router"
-        assert topology["nodes"]["A4B3C2D1E0F09876"]["role"] == "router"
-
-    def test_link_quality_from_connectivity(self, topology):
+    def test_link_quality_derived_from_route(self, topology):
+        # No connectivity TLV -> derived from best inbound neighbour link (3)
         for node in topology["nodes"].values():
             assert node["link_quality"] == 3
 
     def test_child_counts(self, topology):
         counts = {addr: node["child_count"] for addr, node in topology["nodes"].items()}
-        assert counts["1EA5312CFB153F0B"] == 1
-        assert counts["96308C2577D6EA17"] == 1
-        assert counts["A4B3C2D1E0F09876"] == 2
+        assert counts[LEADER] == 2
+        assert counts[ROUTER_A] == 1
+        assert counts[ROUTER_B] == 1
 
     def test_sleepy_vs_active_children(self, topology):
-        node = topology["nodes"]["A4B3C2D1E0F09876"]
+        node = topology["nodes"][LEADER]
         types = sorted(child["type"] for child in node["children"])
         # rxOnWhenIdle False -> sleepy, True -> active
         assert types == ["active", "sleepy"]
 
-    def test_connections_from_route64(self, topology):
-        leader = topology["nodes"]["1EA5312CFB153F0B"]
-        assert leader["connections"]
-        assert leader["connections"][0]["router_id"] == 2
-        assert leader["connections"][0]["cost"] == 1
+    def test_connections_exclude_self(self, topology):
+        leader = topology["nodes"][LEADER]
+        router_ids = {c["router_id"] for c in leader["connections"]}
+        # leader is routerId 7; connections are to 15 and 61, never itself
+        assert router_ids == {15, 61}
+
+    def test_child_rloc16_computed(self, topology):
+        # child rloc16 = parent rloc16 (0x1c00) with child id in low bits
+        leader = topology["nodes"][LEADER]
+        child6 = next(c for c in leader["children"] if c["id"] == 6)
+        assert child6["rloc16"] == (0x1C00 | 6)
 
     def test_matter_split(self, topology):
         assert len(topology["matter_devices"]["thread"]) == 3
