@@ -375,7 +375,11 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         Returns a mapping of normalized extended address -> diagnostic attributes.
         """
-        tasks: list[dict[str, Any]] = []
+        # Run one task per POST. Some OTBR builds reject a multi-task batch with
+        # a generic 422, and one bad destination should not abort the whole
+        # update, so each router is requested independently and failures are
+        # logged and skipped.
+        completed: list[dict[str, Any]] = []
         for device in devices:
             attrs = device.get("attributes", {})
             role = str(_first(attrs, "role", default="")).lower()
@@ -384,21 +388,23 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             destination = device.get("id") or _first(attrs, "extAddress", "extaddress")
             if not destination:
                 continue
-            tasks.append(
-                {
-                    "type": TASK_GET_DIAGNOSTIC,
-                    "attributes": {
-                        "destination": destination,
-                        "types": DIAGNOSTIC_TLV_TYPES,
-                        "timeout": ACTION_TIMEOUT,
-                    },
-                }
-            )
+            task = {
+                "type": TASK_GET_DIAGNOSTIC,
+                "attributes": {
+                    "destination": destination,
+                    "types": DIAGNOSTIC_TLV_TYPES,
+                    "timeout": ACTION_TIMEOUT,
+                },
+            }
+            try:
+                completed.extend(await self._run_actions([task]))
+            except aiohttp.ClientError as err:
+                _LOGGER.warning(
+                    "Diagnostic request for %s failed, skipping: %s", destination, err
+                )
 
-        if not tasks:
+        if not completed:
             return {}
-
-        completed = await self._run_actions(tasks)
 
         # Resolve each completed action's diagnostics relationship to a result.
         diagnostics_by_addr: dict[str, dict[str, Any]] = {}

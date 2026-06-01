@@ -18,7 +18,10 @@ ENDPOINT_DIAGNOSTICS = "/api/diagnostics"
 TASK_UPDATE_DEVICES = "updateDeviceCollectionTask"
 TASK_GET_DIAGNOSTIC = "getNetworkDiagnosticTask"
 
-# Diagnostic TLV types requested per router to build the mesh topology
+# Diagnostic TLV types requested per router to build the mesh topology.
+# Kept to the classic, widely-supported TLVs that the topology builder actually
+# consumes (newer TLVs such as childIpv6Addresses can trigger a 422 on some
+# OTBR builds and are not used here).
 DIAGNOSTIC_TLV_TYPES = [
     "extAddress",
     "rloc16",
@@ -27,7 +30,6 @@ DIAGNOSTIC_TLV_TYPES = [
     "route64",
     "leaderData",
     "childTable",
-    "childIpv6Addresses",
 ]
 
 # Terminal statuses for an action/task in the queue
