@@ -33,6 +33,11 @@ DIAGNOSTIC_TLV_TYPES = [
     # "children" returns each child's extAddress + rloc16 (so children can be
     # matched to Home Assistant Matter devices and named).
     "children",
+    # vendor info, used to name devices not known to Home Assistant Matter
+    # (e.g. standalone OpenThread border routers). NOTE: vendorVersion /
+    # threadStackVersion are rejected (422) on some builds, so are not requested.
+    "vendorName",
+    "vendorModel",
 ]
 
 # Terminal statuses for an action/task in the queue

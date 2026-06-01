@@ -146,9 +146,10 @@ Routers are identified using the **OUI prefix** (first 3 bytes) of their Thread 
 The integration checks in this order:
 1. **Custom routers** — user-defined in `custom_routers.yaml` (see below)
 2. **Home Assistant Matter name** — matched by Thread extended address (so a Matter router shows its HA device name)
-3. **Built-in OUI table** — ~30 known manufacturer prefixes
-4. **Pattern matching** — substring patterns for specific devices
-5. **Neutral fallback** — `Thread Router (XXXX)`, where `XXXX` is the last 4 hex of the extended address (assign a real name via `custom_routers.yaml`)
+3. **Device vendor info** — the device's own `vendorName` / `vendorModel` diagnostic (e.g. `Home Assistant OpenThread Border Router`), useful for devices Home Assistant doesn't know
+4. **Built-in OUI table** — ~30 known manufacturer prefixes
+5. **Pattern matching** — substring patterns for specific devices
+6. **Neutral fallback** — `Thread Router (XXXX)`, where `XXXX` is the last 4 hex of the extended address (assign a real name via `custom_routers.yaml`)
 
 The border router the integration is pointed at is flagged as the **connected OTBR** in the diagram. (It is whatever OTBR you configured — not assumed to be the Home Assistant one, since the HA OTBR build does not expose the full `/api/*` diagnostics this integration needs.)
 

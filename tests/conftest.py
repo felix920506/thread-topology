@@ -139,6 +139,8 @@ def mock_otbr_diagnostics_response() -> dict:
                     "extAddress": "4E6BC0581D23D773",
                     "rloc16": "0xf400",
                     "routerId": 61,
+                    "vendorName": "Home Assistant",
+                    "vendorModel": "OpenThread Border Router",
                     "route": {
                         "routeData": [
                             {"routeId": 7, "linkQualityIn": 3, "linkQualityOut": 3, "routeCost": 1},

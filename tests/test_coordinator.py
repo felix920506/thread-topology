@@ -159,8 +159,16 @@ class TestProcessTopology:
         child6 = next(c for c in leader["children"] if c["id"] == 6)
         assert child6["rloc16"] == (0x1C00 | 6)
 
+    def test_router_named_from_vendor(self, topology):
+        # ROUTER_B reports vendor info and isn't a HA Matter device, so it's
+        # named from vendorName + vendorModel.
+        assert (
+            topology["nodes"][ROUTER_B]["name"]
+            == "Home Assistant OpenThread Border Router"
+        )
+
     def test_children_are_unnamed(self, topology):
-        # With no Matter rloc16 data, children must NOT be given a guessed name.
+        # With no Matter data, children must NOT be given a guessed name.
         for node in topology["nodes"].values():
             for child in node["children"]:
                 assert "name" not in child

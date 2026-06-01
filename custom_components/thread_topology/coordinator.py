@@ -627,11 +627,15 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ext_address: str,
         router_index: int,
         matter_name: str | None = None,
+        vendor_name: str | None = None,
+        vendor_model: str | None = None,
     ) -> dict[str, str]:
         """Identify a router by its extended address or characteristics.
 
         ``matter_name`` is the Home Assistant device name when this router is a
-        known Matter device (matched by extended address).
+        known Matter device (matched by extended address). ``vendor_name`` /
+        ``vendor_model`` come from the device's own diagnostic vendor TLVs and
+        are used when Home Assistant doesn't know the device.
         """
         ext_normalized = _normalize_address(ext_address)
 
@@ -656,6 +660,19 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return {
                 "name": matter_name,
                 "manufacturer": "Matter",
+                "type": "border_router",
+                "icon": "router",
+            }
+
+        # The device's own vendor info (e.g. a standalone OpenThread BR that
+        # Home Assistant doesn't know as a Matter device)
+        vendor_name = (vendor_name or "").strip()
+        vendor_model = (vendor_model or "").strip()
+        if vendor_name or vendor_model:
+            label = " ".join(part for part in (vendor_name, vendor_model) if part)
+            return {
+                "name": label,
+                "manufacturer": vendor_name or "Unknown",
                 "type": "border_router",
                 "icon": "router",
             }
@@ -793,7 +810,11 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # separate OTBR is usually queried), so just flag it, don't name it.
             is_queried_otbr = norm_ext == self_ext and bool(self_ext)
             router_info = self._identify_router(
-                ext_address, router_index, matter_by_ext.get(norm_ext)
+                ext_address,
+                router_index,
+                matter_by_ext.get(norm_ext),
+                _first(diag, "vendorName", default=""),
+                _first(diag, "vendorModel", default=""),
             )
             router_index += 1
 
