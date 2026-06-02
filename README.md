@@ -8,9 +8,10 @@
 >
 > - `GET /api/node` — node / leader information (camelCase, under `data.attributes`)
 > - mesh diagnostics are an **asynchronous task queue**: it `POST`s tasks to `/api/actions`
->   (`updateDeviceCollectionTask`, then `getNetworkDiagnosticTask` per router), polls them to
->   completion, and reads the results from the `/api/devices` and `/api/diagnostics`
->   collections.
+>   (`updateDeviceCollectionTask` to refresh the mesh, then `getNetworkDiagnosticTask` per
+>   router), polls them to completion, and reads the results from the `/api/diagnostics`
+>   collection. (The `/api/devices` collection is refreshed by the task but not read, since
+>   it retains stale entries for devices that have left.)
 >
 > **You need an OTBR build that exposes these `/api/*` endpoints.** Older builds that only
 > serve the legacy `/node` paths are not supported. If you prefer a fully native option,
@@ -192,11 +193,19 @@ All formats are accepted and automatically normalized:
 | Full address | `AABAD11C1D3AF27F` | Exact device only |
 | Full with colons | `AA:BA:D1:1C:1D:3A:F2:7F` | Exact device only |
 | OUI prefix (3 bytes) | `AABAD1` or `AA:BA:D1` | Any device from this manufacturer |
-| Partial pattern | `121BEC` | Any address containing this string |
+| Partial pattern | `121BEC6664` | Any address containing this string |
+
+> A value of exactly 6 hex chars (3 bytes) is treated as an **OUI prefix** and only
+> matches the *start* of an address. For "matches anywhere" behavior, use a pattern
+> **longer than 6 hex chars**.
 
 #### Available Icons
 
-`chip`, `router`, `home-assistant`, `homepod`, `nest`, `eero`, `smartthings`, `nanoleaf`, `apple`
+`chip`, `router`, `appletv`, `homepod`, `nest`, `eero`, `smartthings`, `nanoleaf`, `apple`
+
+> **Note:** the `icon` field is currently reserved and not yet rendered — the topology
+> card uses role-based emoji (👑 leader, 📡 router, 💤/🔋 child). Setting an icon is
+> accepted but has no visible effect today.
 
 ## Troubleshooting
 

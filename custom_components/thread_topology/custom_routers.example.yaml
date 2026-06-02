@@ -10,10 +10,11 @@
 #
 # Address formats (all are accepted):
 #   - Full address:  "AABAD11C1D3AF27F" or "AA:BA:D1:1C:1D:3A:F2:7F"
-#   - OUI prefix:    "AABAD1" or "AA:BA:D1" (first 3 bytes, matches any device with this prefix)
-#   - Partial match: "121BEC" (matches anywhere in the address)
+#   - OUI prefix:    "AABAD1" or "AA:BA:D1" (exactly 3 bytes / 6 hex chars; matches the start)
+#   - Partial match: "121BEC6664" (longer than 6 hex chars; matches anywhere in the address)
 #
-# Icon options: chip, router, home-assistant, homepod, nest, eero, smartthings, nanoleaf, apple
+# Icon options: chip, router, appletv, homepod, nest, eero, smartthings, nanoleaf, apple
+# (Note: the icon field is currently reserved and not yet rendered in the topology card.)
 
 routers:
   # Example: SMlight SLZB-06/07 border router
