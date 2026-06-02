@@ -5,7 +5,8 @@ description = "Home Assistant integration to visualize Thread network topology"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "felix920506", email = "felix920506@gmail.com"}
+    {name = "felix920506", email = "felix920506@gmail.com"},
+    {name = "Joan Josep Tortosa", email = "jjtortosa@users.noreply.github.com"},
 ]
 requires-python = ">=3.11"
 dependencies = [
