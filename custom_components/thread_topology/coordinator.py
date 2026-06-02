@@ -521,7 +521,14 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if identifier[0] == "matter":
                     model = (device.model or "").lower()
                     manufacturer = (device.manufacturer or "").lower()
-                    name = device.name or "Unknown"
+                    # Prefer the user-assigned name (what's shown in the HA UI);
+                    # device.name is the integration default (usually the model),
+                    # so 5 renamed "MYGGBETT" sensors stay distinguishable.
+                    name = (
+                        getattr(device, "name_by_user", None)
+                        or device.name
+                        or "Unknown"
+                    )
 
                     entry = {
                         "name": name,

@@ -14,6 +14,7 @@ sys.modules.setdefault("homeassistant.helpers", MagicMock())
 sys.modules.setdefault("homeassistant.helpers.device_registry", MagicMock())
 sys.modules.setdefault("homeassistant.helpers.update_coordinator", MagicMock())
 
+import custom_components.thread_topology.coordinator as coordinator_module
 from custom_components.thread_topology.coordinator import (
     _normalize_address,
     _parse_rloc16,
@@ -70,6 +71,35 @@ class TestResourceHelpers:
         items = ThreadTopologyCoordinator._resource_list(mock_otbr_diagnostics_response)
         assert len(items) == 3
         assert items[0]["id"] == "diag-1"
+
+
+class TestMatterDeviceNames:
+    """Matter devices should use the user-assigned name, not the model."""
+
+    def _fake_device(self, **kw):
+        dev = MagicMock()
+        dev.identifiers = {("matter", "deviceid_x")}
+        dev.model = kw.get("model", "MYGGBETT")
+        dev.manufacturer = kw.get("manufacturer", "IKEA")
+        dev.name = kw.get("name", "MYGGBETT door/window sensor")
+        dev.name_by_user = kw.get("name_by_user")
+        return dev
+
+    def _devices(self, monkeypatch, dev):
+        reg = MagicMock()
+        reg.devices = {"x": dev}
+        monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: reg)
+        coord = _build_coordinator()
+        coord.hass = MagicMock()  # not set by the fake coordinator base
+        return coord._get_matter_devices()
+
+    def test_prefers_user_name(self, monkeypatch):
+        dev = self._fake_device(name_by_user="Front Door")
+        assert self._devices(monkeypatch, dev)[0]["name"] == "Front Door"
+
+    def test_falls_back_to_device_name(self, monkeypatch):
+        dev = self._fake_device(name_by_user=None)
+        assert self._devices(monkeypatch, dev)[0]["name"] == "MYGGBETT door/window sensor"
 
 
 class TestParseRloc16:
