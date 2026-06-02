@@ -226,6 +226,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Credits
 
+- Originally created by [Joan Josep Tortosa (@jjtortosa)](https://github.com/jjtortosa/thread-topology); maintained by [@felix920506](https://github.com/felix920506/thread-topology)
 - Built for the Home Assistant community
 - Inspired by the Zigbee network map functionality
 - Uses the OpenThread Border Router REST API
