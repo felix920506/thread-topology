@@ -5,7 +5,7 @@ description = "Home Assistant integration to visualize Thread network topology"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "Joan Josep Tortosa", email = "jjtortosa@users.noreply.github.com"}
+    {name = "felix920506", email = "felix920506@gmail.com"}
 ]
 requires-python = ">=3.11"
 dependencies = [
@@ -22,9 +22,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jjtortosa/thread-topology"
-Repository = "https://github.com/jjtortosa/thread-topology"
-Issues = "https://github.com/jjtortosa/thread-topology/issues"
+Homepage = "https://github.com/felix920506/thread-topology"
+Repository = "https://github.com/felix920506/thread-topology"
+Issues = "https://github.com/felix920506/thread-topology/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

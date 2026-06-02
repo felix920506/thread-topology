@@ -18,8 +18,8 @@
 > Thread Network Diagnostics Cluster over Matter.
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
-[![GitHub Release](https://img.shields.io/github/release/jjtortosa/thread-topology.svg)](https://github.com/jjtortosa/thread-topology/releases)
-[![License](https://img.shields.io/github/license/jjtortosa/thread-topology.svg)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/release/felix920506/thread-topology.svg)](https://github.com/felix920506/thread-topology/releases)
+[![License](https://img.shields.io/github/license/felix920506/thread-topology.svg)](LICENSE)
 
 A Home Assistant custom integration that visualizes your Thread network topology, similar to the Zigbee network map. See your Thread Border Routers, end devices, and their connections at a glance.
 
@@ -73,7 +73,7 @@ A Home Assistant custom integration that visualizes your Thread network topology
 
 1. Open HACS in Home Assistant
 2. Click the three dots menu → **Custom repositories**
-3. Add `https://github.com/jjtortosa/thread-topology` as an **Integration**
+3. Add `https://github.com/felix920506/thread-topology` as an **Integration**
 4. Search for "Thread Network Topology" and install
 5. Restart Home Assistant
 
@@ -232,5 +232,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-- [GitHub Issues](https://github.com/jjtortosa/thread-topology/issues)
+- [GitHub Issues](https://github.com/felix920506/thread-topology/issues)
 - [Home Assistant Community](https://community.home-assistant.io/)

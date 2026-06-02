@@ -1,13 +1,13 @@
 {
   "domain": "thread_topology",
   "name": "Thread Network Topology",
-  "codeowners": ["@jjtortosa"],
+  "codeowners": ["@felix920506"],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/jjtortosa/thread-topology",
+  "documentation": "https://github.com/felix920506/thread-topology",
   "integration_type": "service",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/jjtortosa/thread-topology/issues",
+  "issue_tracker": "https://github.com/felix920506/thread-topology/issues",
   "requirements": ["aiohttp>=3.8.0"],
-  "version": "0.7.1"
+  "version": "0.7.2"
 }
