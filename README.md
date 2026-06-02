@@ -1,22 +1,25 @@
 # Thread Network Topology for Home Assistant
 
-> ## ✅ Requires a recent OTBR build (new REST API)
+> ## ✅ Requires a recent OTBR build (`/api/*` REST API)
 >
 > This integration uses the OpenThread Border Router (OTBR) **REST API**. OTBR reorganized
 > that API: the old `GET /node` and `GET /diagnostics` endpoints are gone. The integration
-> now targets the current JSON:API layout under `/api/*`:
+> now targets the current REST layout under `/api/*`:
 >
-> - `GET /api/node` — node / leader information (camelCase, under `data.attributes`)
+> - `GET /api/node` — node / leader information. Some builds return a
+>   JSON:API-wrapped attributes object; others return a flat camelCase object,
+>   and the integration handles both.
 > - mesh diagnostics are an **asynchronous task queue**: it `POST`s tasks to `/api/actions`
 >   (`updateDeviceCollectionTask` to refresh the mesh, then `getNetworkDiagnosticTask` per
 >   router), polls them to completion, and reads the results from the `/api/diagnostics`
 >   collection. (The `/api/devices` collection is refreshed by the task but not read, since
 >   it retains stale entries for devices that have left.)
 >
-> **You need an OTBR build that exposes these `/api/*` endpoints.** Older builds that only
-> serve the legacy `/node` paths are not supported. If you prefer a fully native option,
-> the **Open Home Foundation Matter Server** also renders a Thread mesh diagram from the
-> Thread Network Diagnostics Cluster over Matter.
+> **You need an OTBR build that exposes `/api/node`, `/api/actions`, and
+> `/api/diagnostics`.** Older builds that only serve the legacy `/node` paths are
+> not supported. If you prefer a fully native option, the **Open Home Foundation
+> Matter Server** also renders a Thread mesh diagram from the Thread Network
+> Diagnostics Cluster over Matter.
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![GitHub Release](https://img.shields.io/github/release/felix920506/thread-topology.svg)](https://github.com/felix920506/thread-topology/releases)
@@ -57,13 +60,18 @@ A Home Assistant custom integration that visualizes your Thread network topology
 
 > Routers and end devices are named from a matched Home Assistant Matter device
 > — using the **name you set in Home Assistant** (not the model) — matched by
-> extended address. Other devices fall back to vendor info, the address OUI, or
-> `custom_routers.yaml`; anything still unknown shows as `Device (<address tail>)`.
+> extended address. Routers fall back to vendor info, the address OUI,
+> `custom_routers.yaml`, or `Thread Router (XXXX)`; unnamed children show as
+> `Device (<address tail>)` when their extended address is available.
 
 ## Requirements
 
-- Home Assistant 2024.1.0 or newer
-- OpenThread Border Router (OTBR) addon running
+- Home Assistant 2024.1.0 or newer for this custom integration
+- OpenThread Border Router (OTBR) REST API reachable on port 8081, exposing
+  `/api/node`, `/api/actions`, and `/api/diagnostics`
+- If you use the Home Assistant OTBR app (formerly add-on), use a version
+  compatible with your Home Assistant installation; the current app package may
+  require Home Assistant 2025.7.0 or newer
 - Thread network with at least one border router
 
 ## Installation
@@ -94,7 +102,7 @@ A Home Assistant custom integration that visualizes your Thread network topology
 
 | Setup | URL |
 |-------|-----|
-| Home Assistant OS with OTBR addon | `http://core-openthread-border-router:8081` |
+| Home Assistant OS with OTBR app (formerly add-on) | `http://core-openthread-border-router:8081` |
 | Docker OTBR | `http://localhost:8081` or `http://<docker-host>:8081` |
 | Standalone OTBR | `http://<otbr-ip>:8081` |
 
@@ -104,7 +112,7 @@ A Home Assistant custom integration that visualizes your Thread network topology
 |--------|-------------|
 | `sensor.thread_topology_map` | The topology diagram + text (state = device count) |
 | `sensor.thread_network` | Network name and overview stats |
-| `sensor.thread_<router_name>` | One sensor per router with link quality |
+| Router sensors | One sensor per discovered router with link quality. Home Assistant generates the final entity ID from the router name and may customize or suffix it. |
 
 ## Dashboard Card
 
@@ -150,7 +158,7 @@ The integration checks in this order:
 5. **Pattern matching** — substring patterns for specific devices
 6. **Neutral fallback** — `Thread Router (XXXX)`, where `XXXX` is the last 4 hex of the extended address (assign a real name via `custom_routers.yaml`)
 
-The border router the integration is pointed at is flagged as the **connected OTBR** in the diagram. (It is whatever OTBR you configured — not assumed to be the Home Assistant one, since the HA OTBR build does not expose the full `/api/*` diagnostics this integration needs.)
+The border router the integration is pointed at is flagged as the **connected OTBR** in the diagram. It is whichever OTBR URL you configured for this integration.
 
 ### Custom Border Router Configuration
 
@@ -210,7 +218,8 @@ All formats are accepted and automatically normalized:
 ## Troubleshooting
 
 ### "Cannot connect to OTBR"
-- Ensure the OpenThread Border Router addon is running
+- Ensure the OpenThread Border Router app (formerly add-on) or your standalone
+  OTBR service is running
 - Check if the URL is correct (try accessing it in your browser)
 - Verify network connectivity between HA and OTBR
 
