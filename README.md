@@ -29,7 +29,7 @@ A Home Assistant custom integration that visualizes your Thread network topology
 
 - **Visual Topology Map**: See your entire Thread network structure in a markdown card
 - **Device Identification**: Names routers from your Home Assistant Matter devices or by OUI, and flags the OTBR it's connected to
-- **Matter Integration**: Links Thread devices with their Matter device names from Home Assistant
+- **Matter Integration**: Labels Thread devices with the name you set in Home Assistant (not the model), so five identical sensors stay distinguishable
 - **Link Quality Indicators**: Visual representation of connection quality (Poor/Fair/Good/Excellent)
 - **WiFi vs Thread**: Separates Matter devices by transport type
 - **Periodic Updates**: Every 60 seconds it discovers the network and queries per-router diagnostics to rebuild the map
@@ -57,9 +57,9 @@ A Home Assistant custom integration that visualizes your Thread network topology
 ```
 
 > Routers and end devices are named from a matched Home Assistant Matter device
-> (by extended address), the address OUI, or `custom_routers.yaml`. Devices Home
-> Assistant doesn't know (or non‑Matter Thread devices) fall back to
-> `Device (<address tail>)`.
+> — using the **name you set in Home Assistant** (not the model) — matched by
+> extended address. Other devices fall back to vendor info, the address OUI, or
+> `custom_routers.yaml`; anything still unknown shows as `Device (<address tail>)`.
 
 ## Requirements
 
@@ -124,7 +124,7 @@ For more complete examples including stats tiles, see the [examples/lovelace-car
 
 1. **OTBR API**: Reads `/api/node`, triggers per-router diagnostics (by rloc16) via the `/api/actions` task queue, then reads the live `/api/diagnostics` collection
 2. **Topology**: Every router present in the live diagnostics becomes a node — matching what the OTBR web UI graphs (the cached `/api/devices` list is not used, as it keeps stale entries for devices that have left). The leader is the router whose `routerId` matches `leaderData.leaderRouterId`; each router's children come from its `children` diagnostic
-3. **Matter names**: Reads your Home Assistant Matter devices' Thread extended address (the "MAC address" on the device's *Matter info* panel) and matches it to the OTBR device by extended address — so **both routers and sleepy end devices** show their real Home Assistant name. Children come from the per‑router `children` diagnostic, which includes each child's extended address
+3. **Matter names**: Reads your Home Assistant Matter devices' Thread extended address (the "MAC address" on the device's *Matter info* panel) and matches it to the OTBR device by extended address — so **both routers and sleepy end devices** show the **name you set in Home Assistant** (the user-assigned name, not the model, so identical devices stay distinguishable). Children come from the per‑router `children` diagnostic, which includes each child's extended address
 
 ## Supported Border Routers
 
@@ -145,7 +145,7 @@ Routers are identified using the **OUI prefix** (first 3 bytes) of their Thread 
 
 The integration checks in this order:
 1. **Custom routers** — user-defined in `custom_routers.yaml` (see below)
-2. **Home Assistant Matter name** — matched by Thread extended address (so a Matter router shows its HA device name)
+2. **Home Assistant Matter name** — matched by Thread extended address (the name you set in HA, not the model)
 3. **Device vendor info** — the device's own `vendorName` / `vendorModel` diagnostic (e.g. `Home Assistant OpenThread Border Router`), useful for devices Home Assistant doesn't know
 4. **Built-in OUI table** — ~30 known manufacturer prefixes
 5. **Pattern matching** — substring patterns for specific devices
