@@ -50,7 +50,11 @@ ACTION_TIMEOUT = 60
 ACTION_POLL_INTERVAL = 1.0
 
 # updateDeviceCollectionTask required attributes (all four are mandatory)
-DISCOVERY_MAX_AGE = 30
+# maxAge caps how stale a cached device entry may be before OTBR re-queries it:
+# OTBR is free to return cached results for any entry younger than maxAge instead
+# of actively crawling the mesh. Set to 0 so every poll forces a real crawl rather
+# than replaying the cache (otherwise the topology goes stale / drops live nodes).
+DISCOVERY_MAX_AGE = 0
 DISCOVERY_MAX_RETRIES = 5
 DISCOVERY_DEVICE_COUNT = 64
 
