@@ -983,25 +983,24 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             lq = lq_text[min(lq_value, 3)] if isinstance(lq_value, int) else "Unknown"
             # Mark the border router this integration is connected to
             otbr_tag = "  ·  \U0001f310 connected OTBR" if node.get("is_otbr") else ""
+            # Always show the 4-digit hex node number (rloc16), even for routers
+            # already named from Home Assistant.
+            rloc_hex = f"0x{node.get('rloc16', 0):04x}"
             lines.append("")
             lines.append(
-                f"{emoji} {node.get('name', 'Router')}  ·  {role_label}  ·  "
-                f"LQ {lq}{otbr_tag}"
+                f"{emoji} {node.get('name', 'Router')} ({rloc_hex})  ·  "
+                f"{role_label}  ·  LQ {lq}{otbr_tag}"
             )
             children = node.get("children", [])
             for i, child in enumerate(children):
                 branch = "└─" if i == len(children) - 1 else "├─"
                 cemoji = "\U0001f4a4" if child.get("type") == "sleepy" else "\U0001f50b"
-                # Prefer the HA name; else identify by the extended-address tail
-                # (the "MAC" shown in HA), falling back to the unique rloc16.
-                cname = child.get("name")
-                if not cname:
-                    ext = (child.get("ext_address") or "").upper()
-                    cname = (
-                        f"Device ({ext[-4:]})" if ext
-                        else f"Device 0x{child.get('rloc16', 0):04x}"
-                    )
-                lines.append(f"{branch} {cemoji} {cname}")
+                # Prefer the HA name; fall back to a neutral "Device" label.
+                cname = child.get("name") or "Device"
+                # Always show the 4-digit hex node number (rloc16), even for
+                # children already named from Home Assistant.
+                crloc_hex = f"0x{child.get('rloc16', 0):04x}"
+                lines.append(f"{branch} {cemoji} {cname} ({crloc_hex})")
 
         if wifi_matter:
             lines.append("")

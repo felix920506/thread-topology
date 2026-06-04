@@ -268,6 +268,8 @@ class TestProcessTopology:
         assert "👑" in tree  # leader
         assert "📡" in tree  # router
         assert "└─" in tree  # child branch
+        # 4-digit hex node number (rloc16) shown for every node, even named ones
+        assert "0x3c00" in tree  # leader rloc16
 
     def test_tree_empty_network(self):
         coordinator = _build_coordinator()
