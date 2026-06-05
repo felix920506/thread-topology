@@ -116,13 +116,16 @@ A Home Assistant custom integration that visualizes your Thread network topology
 
 ## Dashboard Cards
 
-### Graph card (force-directed mesh map)
+### Graph card (interactive mesh map)
 
-The integration ships a **custom card** that draws the network as a graph:
-routers as coloured hexagons (🔴 leader, 🔵 connected OTBR, 🟠 router), the
-router-to-router links coloured and labelled by link quality, and each router's
-children hanging off it. A router with no links shows as detached — making
-re-parenting and dropped routers obvious at a glance.
+The integration ships a **custom card** that draws the network as an interactive
+graph (drag nodes, zoom, pan, hover for details), powered by
+[vis-network](https://visjs.github.io/vis-network/) which is bundled with the
+integration (no internet needed). Routers are coloured hexagons (🔴 leader,
+🔵 connected OTBR, 🟠 router), the router-to-router links are coloured and
+labelled by link quality, and each router's children hang off it. A router with
+no links shows as detached — making re-parenting and dropped routers obvious at
+a glance.
 
 The card's JavaScript is served and registered as a dashboard resource by the
 integration **automatically** — no manual *Settings → Dashboards → Resources*
@@ -263,12 +266,17 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
+The graph card bundles [vis-network](https://visjs.github.io/vis-network/)
+(`custom_components/thread_topology/www/vis-network.min.js`), which is dual
+licensed under the Apache 2.0 and MIT licenses.
+
 ## Credits
 
 - Originally created by [Joan Josep Tortosa (@jjtortosa)](https://github.com/jjtortosa/thread-topology); maintained by [@felix920506](https://github.com/felix920506/thread-topology)
 - Built for the Home Assistant community
 - Inspired by the Zigbee network map functionality
 - Uses the OpenThread Border Router REST API
+- Graph rendering by [vis-network](https://visjs.github.io/vis-network/)
 
 ## Support
 

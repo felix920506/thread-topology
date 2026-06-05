@@ -22,7 +22,7 @@ FRONTEND_URL_BASE = "/thread_topology"
 CARD_FILENAME = "thread-topology-card.js"
 _FRONTEND_REGISTERED = f"{DOMAIN}_frontend_registered"
 # Bump when the card JS changes so browsers re-fetch it (cache-buster).
-CARD_VERSION = "0.7.2"
+CARD_VERSION = "0.7.2-vis2"
 
 
 async def _async_register_frontend(hass: HomeAssistant) -> None:
@@ -31,21 +31,22 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
         return
     hass.data[_FRONTEND_REGISTERED] = True
 
-    card_path = Path(__file__).parent / "www" / CARD_FILENAME
+    www_dir = Path(__file__).parent / "www"
     card_url = f"{FRONTEND_URL_BASE}/{CARD_FILENAME}"
 
     # The card is cosmetic: never let a frontend hiccup block the integration's
-    # sensors from loading.
+    # sensors from loading. The whole www/ directory is served so the card and
+    # its bundled vis-network library are both reachable under the same base.
     try:
         try:
             from homeassistant.components.http import StaticPathConfig
 
             await hass.http.async_register_static_paths(
-                [StaticPathConfig(card_url, str(card_path), False)]
+                [StaticPathConfig(FRONTEND_URL_BASE, str(www_dir), False)]
             )
         except ImportError:
             # Older HA without StaticPathConfig: fall back to the sync registrar.
-            hass.http.register_static_path(card_url, str(card_path), False)
+            hass.http.register_static_path(FRONTEND_URL_BASE, str(www_dir), False)
 
         from homeassistant.components.frontend import add_extra_js_url
 
