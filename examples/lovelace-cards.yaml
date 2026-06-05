@@ -2,6 +2,22 @@
 # Copy any of these configurations to your dashboard
 
 # ===========================================
+# GRAPH: Force-directed mesh map (custom card)
+# ===========================================
+# The integration ships a custom card that draws the mesh as a graph: routers
+# as coloured hexagons (red = leader, blue = connected OTBR, amber = router),
+# the router-to-router links coloured + labelled by link quality, and each
+# router's children hanging off it. The card's JS is served and registered by
+# the integration automatically - no manual Resources entry or HACS frontend
+# repo needed. (If it doesn't appear, hard-refresh the browser to clear the
+# cached dashboard, since the resource is added on HA start.)
+
+type: custom:thread-topology-card
+entity: sensor.thread_topology_map   # optional (this is the default)
+title: Thread Network                # optional
+height: 460                          # optional, px
+
+# ===========================================
 # EASIEST: The topology diagram (ASCII tree)
 # ===========================================
 # The built-in Markdown card renders the monospace tree directly - no custom

@@ -114,11 +114,34 @@ A Home Assistant custom integration that visualizes your Thread network topology
 | `sensor.thread_network` | Network name and overview stats |
 | Router sensors | One sensor per discovered router with link quality. Home Assistant generates the final entity ID from the router name and may customize or suffix it. |
 
-## Dashboard Card
+## Dashboard Cards
 
-The diagram is a monospace ASCII tree that Home Assistant's **built-in Markdown
-card renders directly** (no custom cards or HACS dependencies). Just add a
-Markdown card pointing at the `topology_text` attribute:
+### Graph card (force-directed mesh map)
+
+The integration ships a **custom card** that draws the network as a graph:
+routers as coloured hexagons (🔴 leader, 🔵 connected OTBR, 🟠 router), the
+router-to-router links coloured and labelled by link quality, and each router's
+children hanging off it. A router with no links shows as detached — making
+re-parenting and dropped routers obvious at a glance.
+
+The card's JavaScript is served and registered as a dashboard resource by the
+integration **automatically** — no manual *Settings → Dashboards → Resources*
+entry and no separate HACS frontend repo. After installing/updating, do a hard
+browser refresh so the new resource loads.
+
+```yaml
+type: custom:thread-topology-card
+entity: sensor.thread_topology_map   # optional (default)
+title: Thread Network                # optional
+height: 460                          # optional, px
+```
+
+### Text card (ASCII tree)
+
+The diagram is also available as a monospace ASCII tree that Home Assistant's
+**built-in Markdown card renders directly** (no custom card needed). It lists
+each router with its children plus a **Mesh links** section for the
+router-to-router edges:
 
 ```yaml
 type: markdown

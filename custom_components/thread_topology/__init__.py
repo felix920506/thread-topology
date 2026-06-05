@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -14,9 +15,53 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [Platform.SENSOR]
 
+# Frontend custom card shipped with the integration. It is served from a static
+# path and registered as an ES-module resource so the user does not have to add
+# it under Settings > Dashboards > Resources manually.
+FRONTEND_URL_BASE = "/thread_topology"
+CARD_FILENAME = "thread-topology-card.js"
+_FRONTEND_REGISTERED = f"{DOMAIN}_frontend_registered"
+# Bump when the card JS changes so browsers re-fetch it (cache-buster).
+CARD_VERSION = "0.7.2"
+
+
+async def _async_register_frontend(hass: HomeAssistant) -> None:
+    """Serve and register the custom Lovelace card (once per HA run)."""
+    if hass.data.get(_FRONTEND_REGISTERED):
+        return
+    hass.data[_FRONTEND_REGISTERED] = True
+
+    card_path = Path(__file__).parent / "www" / CARD_FILENAME
+    card_url = f"{FRONTEND_URL_BASE}/{CARD_FILENAME}"
+
+    # The card is cosmetic: never let a frontend hiccup block the integration's
+    # sensors from loading.
+    try:
+        try:
+            from homeassistant.components.http import StaticPathConfig
+
+            await hass.http.async_register_static_paths(
+                [StaticPathConfig(card_url, str(card_path), False)]
+            )
+        except ImportError:
+            # Older HA without StaticPathConfig: fall back to the sync registrar.
+            hass.http.register_static_path(card_url, str(card_path), False)
+
+        from homeassistant.components.frontend import add_extra_js_url
+
+        add_extra_js_url(hass, f"{card_url}?v={CARD_VERSION}")
+    except Exception:  # noqa: BLE001 - frontend may be unavailable in some setups
+        _LOGGER.warning(
+            "Could not auto-register the Thread Topology card; add %s as a "
+            "dashboard resource manually if you want the graph card",
+            card_url,
+        )
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Thread Topology from a config entry."""
+    await _async_register_frontend(hass)
+
     otbr_url = entry.data.get("otbr_url", DEFAULT_OTBR_URL)
 
     coordinator = ThreadTopologyCoordinator(hass, otbr_url)
