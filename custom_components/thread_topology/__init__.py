@@ -20,9 +20,10 @@ PLATFORMS = [Platform.SENSOR]
 # it under Settings > Dashboards > Resources manually.
 FRONTEND_URL_BASE = "/thread_topology"
 CARD_FILENAME = "thread-topology-card.js"
+VIS_FILENAME = "vis-network.min.js"
 _FRONTEND_REGISTERED = f"{DOMAIN}_frontend_registered"
 # Bump when the card JS changes so browsers re-fetch it (cache-buster).
-CARD_VERSION = "0.7.2-vis3"
+CARD_VERSION = "0.7.2-vis4"
 
 
 async def _async_register_frontend(hass: HomeAssistant) -> None:
@@ -33,20 +34,31 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
 
     www_dir = Path(__file__).parent / "www"
     card_url = f"{FRONTEND_URL_BASE}/{CARD_FILENAME}"
+    # Serve each shipped asset as its own explicit file route. (Registering the
+    # directory was unreliable on some setups and left the card/library 404ing,
+    # which makes the card spin forever in the dashboard editor.)
+    files = (CARD_FILENAME, VIS_FILENAME)
 
     # The card is cosmetic: never let a frontend hiccup block the integration's
-    # sensors from loading. The whole www/ directory is served so the card and
-    # its bundled vis-network library are both reachable under the same base.
+    # sensors from loading.
     try:
         try:
             from homeassistant.components.http import StaticPathConfig
 
             await hass.http.async_register_static_paths(
-                [StaticPathConfig(FRONTEND_URL_BASE, str(www_dir), False)]
+                [
+                    StaticPathConfig(
+                        f"{FRONTEND_URL_BASE}/{name}", str(www_dir / name), False
+                    )
+                    for name in files
+                ]
             )
         except ImportError:
             # Older HA without StaticPathConfig: fall back to the sync registrar.
-            hass.http.register_static_path(FRONTEND_URL_BASE, str(www_dir), False)
+            for name in files:
+                hass.http.register_static_path(
+                    f"{FRONTEND_URL_BASE}/{name}", str(www_dir / name), False
+                )
 
         from homeassistant.components.frontend import add_extra_js_url
 

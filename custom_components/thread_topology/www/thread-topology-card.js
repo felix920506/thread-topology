@@ -45,15 +45,26 @@ function rlocHex(v) {
 }
 
 // Load the bundled vis-network UMD once and resolve to the global `vis`.
+// A failed load is NOT cached, so a transient 404 (e.g. before the integration
+// finishes registering its static path) can be retried on the next update
+// instead of permanently wedging the card.
 function loadVis() {
   if (window.vis && window.vis.Network) return Promise.resolve(window.vis);
   if (!window.__threadTopologyVisPromise) {
     window.__threadTopologyVisPromise = new Promise((resolve, reject) => {
-      const script = document.createElement("script");
+      const existing = document.querySelector('script[data-thread-topology-vis]');
+      const script = existing || document.createElement("script");
       script.src = VIS_URL;
-      script.onload = () => resolve(window.vis);
+      script.setAttribute("data-thread-topology-vis", "");
+      script.onload = () =>
+        window.vis && window.vis.Network
+          ? resolve(window.vis)
+          : reject(new Error("vis-network loaded but global `vis` is missing"));
       script.onerror = () => reject(new Error("Failed to load vis-network from " + VIS_URL));
-      document.head.appendChild(script);
+      if (!existing) document.head.appendChild(script);
+    }).catch((err) => {
+      window.__threadTopologyVisPromise = null; // allow a later retry
+      throw err;
     });
   }
   return window.__threadTopologyVisPromise;
@@ -78,6 +89,14 @@ class ThreadTopologyCard extends HTMLElement {
       ...config,
     };
     this._built = false; // force a rebuild of the shell on reconfig
+    // Render a shell immediately so the card always has visible content (the
+    // dashboard editor shows a spinner until the element renders something).
+    this._buildShell();
+    this._message("Loading Thread topology…");
+  }
+
+  connectedCallback() {
+    if (!this._built && this._config) this._buildShell();
   }
 
   set hass(hass) {
@@ -269,20 +288,28 @@ class ThreadTopologyCard extends HTMLElement {
 
     const { visNodes, visEdges } = this._buildGraphData(nodes);
 
-    if (!this._network) {
-      this._datasets = {
-        nodes: new vis.DataSet(visNodes),
-        edges: new vis.DataSet(visEdges),
-      };
-      this._network = new vis.Network(
-        this._container,
-        this._datasets,
-        this._networkOptions()
-      );
-    } else {
-      // Update in place so the view (zoom/pan) and node positions are kept.
-      this._syncDataset(this._datasets.nodes, visNodes);
-      this._syncDataset(this._datasets.edges, visEdges);
+    try {
+      if (!this._network) {
+        // Container was replaced by a "loading" message; restore it.
+        if (!this.shadowRoot.getElementById("graph")) this._buildShell();
+        this._container.innerHTML = ""; // clear the loading placeholder
+        this._datasets = {
+          nodes: new vis.DataSet(visNodes),
+          edges: new vis.DataSet(visEdges),
+        };
+        this._network = new vis.Network(
+          this._container,
+          this._datasets,
+          this._networkOptions()
+        );
+      } else {
+        // Update in place so the view (zoom/pan) and node positions are kept.
+        this._syncDataset(this._datasets.nodes, visNodes);
+        this._syncDataset(this._datasets.edges, visEdges);
+      }
+    } catch (err) {
+      console.error("thread-topology-card: failed to render graph", err);
+      this._message("Could not render the topology graph.");
     }
   }
 
