@@ -22,7 +22,7 @@ FRONTEND_URL_BASE = "/thread_topology"
 CARD_FILENAME = "thread-topology-card.js"
 _FRONTEND_REGISTERED = f"{DOMAIN}_frontend_registered"
 # Bump when the card JS changes so browsers re-fetch it (cache-buster).
-CARD_VERSION = "0.7.2-vis2"
+CARD_VERSION = "0.7.2-vis3"
 
 
 async def _async_register_frontend(hass: HomeAssistant) -> None:

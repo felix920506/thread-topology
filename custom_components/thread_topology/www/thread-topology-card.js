@@ -31,8 +31,11 @@ const CHILD_COLORS = {
   sleepy: "#6b7280", // grey
   active: "#10b981", // green
 };
-const LQ_COLORS = { 3: "#2ecc71", 2: "#f39c12", 1: "#e67e22", 0: "#e74c3c" };
-const LQ_UNKNOWN = "#9aa0a6";
+// Brightened so low-quality links (1 / 0) stay visible on a dark dashboard
+// theme — dark red/orange hairlines were effectively invisible before.
+const LQ_COLORS = { 3: "#2ecc71", 2: "#ffd21a", 1: "#ff8c1a", 0: "#ff4d4d" };
+const LQ_UNKNOWN = "#b0b6be";
+const CHILD_LINK_COLOR = "#9aa0a6";
 
 function lqColor(lq) {
   return lq === null || lq === undefined ? LQ_UNKNOWN : LQ_COLORS[Math.max(0, Math.min(3, lq))];
@@ -189,8 +192,9 @@ class ThreadTopologyCard extends HTMLElement {
           to: target,
           label: `LQ ${lqOut}/${lqIn}`,
           color: { color: lqColor(lq), highlight: lqColor(lq) },
-          width: lq >= 3 ? 3 : lq >= 2 ? 2.2 : 1.5,
-          font: { color: lqColor(lq), size: 12, strokeWidth: 0, align: "top" },
+          // Keep a generous minimum width so poor links are still easy to see.
+          width: lq >= 3 ? 3.5 : lq >= 2 ? 3 : 2.5,
+          font: { color: lqColor(lq), size: 12, strokeWidth: 3, strokeColor: "rgba(0,0,0,0.45)", align: "top" },
           smooth: false,
           title: `cost ${c.cost ?? 0}`,
         });
@@ -216,9 +220,9 @@ class ThreadTopologyCard extends HTMLElement {
           id: "ce:" + cid,
           from: "r:" + ext,
           to: cid,
-          dashes: true,
-          color: { color: this._secondaryColor, opacity: 0.6 },
-          width: 1,
+          dashes: [4, 4],
+          color: { color: CHILD_LINK_COLOR, opacity: 0.85 },
+          width: 1.4,
           smooth: false,
         });
       });
