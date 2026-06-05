@@ -1002,6 +1002,38 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 crloc_hex = f"0x{child.get('rloc16', 0):04x}"
                 lines.append(f"{branch} {cemoji} {cname} ({crloc_hex})")
 
+        # Inter-router mesh links (the router↔router edges the graph tools draw).
+        # Each router's route table reports the link to every neighbour, so the
+        # same edge is seen from both ends; key by the unordered rloc16 pair and
+        # keep the first sighting. ``lq_out``/``lq_in`` are relative to the node
+        # that reported the edge (``a``): out = a→b, in = b→a.
+        links: dict[frozenset[int], dict[str, int]] = {}
+        for ext, node in ordered:
+            a_rloc = node.get("rloc16", 0)
+            for conn in node.get("connections", []):
+                b_rloc = (conn.get("router_id", 0) << 10) & 0xFFFF
+                key = frozenset((a_rloc, b_rloc))
+                if len(key) < 2 or key in links:
+                    continue
+                links[key] = {
+                    "a": a_rloc,
+                    "b": b_rloc,
+                    "lq_out": conn.get("lq_out", 0),
+                    "lq_in": conn.get("lq_in", 0),
+                    "cost": conn.get("cost", 0),
+                }
+
+        if links:
+            lines.append("")
+            lines.append("\U0001f517 Mesh links  (LQ a→b / b→a)")
+            for link in sorted(links.values(), key=lambda lk: (lk["a"], lk["b"])):
+                a_hex = f"0x{link['a']:04x}"
+                b_hex = f"0x{link['b']:04x}"
+                lines.append(
+                    f"   {a_hex} ↔ {b_hex}  ·  "
+                    f"LQ {link['lq_out']}/{link['lq_in']}  ·  cost {link['cost']}"
+                )
+
         if wifi_matter:
             lines.append("")
             lines.append("\U0001f4f6 Matter over WiFi")

@@ -270,6 +270,14 @@ class TestProcessTopology:
         assert "└─" in tree  # child branch
         # 4-digit hex node number (rloc16) shown for every node, even named ones
         assert "0x3c00" in tree  # leader rloc16
+        # Inter-router mesh links (router↔router edges) are rendered, de-duped to
+        # one line per pair, with directional LQ and route cost.
+        assert "Mesh links" in tree
+        assert "0x1c00 ↔ 0x3c00" in tree
+        assert "0x1c00 ↔ 0xf400" in tree
+        assert "0x3c00 ↔ 0xf400" in tree
+        assert tree.count(" ↔ ") == 3  # three unique edges, not six directed
+        assert "cost 1" in tree
 
     def test_tree_empty_network(self):
         coordinator = _build_coordinator()
