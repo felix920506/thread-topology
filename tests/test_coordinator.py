@@ -1,10 +1,8 @@
 """Tests for Thread Topology coordinator."""
 from __future__ import annotations
 
-import asyncio
 import logging
 import sys
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 import pytest
 
@@ -19,6 +17,7 @@ sys.modules.setdefault("homeassistant.helpers.update_coordinator", MagicMock())
 
 import custom_components.thread_topology.coordinator as coordinator_module
 from custom_components.thread_topology.coordinator import (
+    _ext_from_ipv6,
     _normalize_address,
     _parse_rloc16,
     KNOWN_BORDER_ROUTER_OUIS,
@@ -94,7 +93,7 @@ class TestMatterDeviceNames:
         monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: reg)
         coord = _build_coordinator()
         coord.hass = MagicMock()  # not set by the fake coordinator base
-        return asyncio.run(coord._get_matter_devices())
+        return coord._get_matter_devices()
 
     def test_prefers_user_name(self, monkeypatch):
         dev = self._fake_device(name_by_user="Front Door")
@@ -105,81 +104,42 @@ class TestMatterDeviceNames:
         assert self._devices(monkeypatch, dev)[0]["name"] == "MYGGBETT door/window sensor"
 
 
-class TestLiveReadOpExt:
-    """Live read of the operational ExtAddress for sleepy end devices."""
+class TestExtFromIPv6:
+    """Derive the operational extended address from a Thread link-local IPv6."""
 
-    def _clusters(self):
-        return SimpleNamespace(
-            ThreadNetworkDiagnostics=SimpleNamespace(
-                id=53,
-                Attributes=SimpleNamespace(
-                    ExtAddress=SimpleNamespace(attribute_id=0)
-                ),
-            )
-        )
+    @staticmethod
+    def _addr(hex_str: str) -> bytes:
+        return bytes.fromhex(hex_str)
 
-    def _coord_with_client(self, monkeypatch, read_attribute):
-        coord = _build_coordinator()
-        coord.hass = MagicMock()
-        client = MagicMock()
-        client.read_attribute = read_attribute
-        monkeypatch.setattr(coord, "_get_matter_client", lambda: client)
-        return coord
+    def test_derives_from_link_local(self):
+        # fe80::10df:6938:9325:7aa1 -> flip U/L bit (0x10 ^ 0x02 = 0x12)
+        ll = self._addr("fe80000000000000" "10df693893257aa1")
+        assert _ext_from_ipv6([ll]) == "12df693893257aa1"
 
-    def test_parses_dict_result(self, monkeypatch):
-        async def read_attribute(node_id, attr_path):
-            assert attr_path == "0/53/0"
-            return {"0/53/0": 0x0BADCAFE00000001}
+    def test_picks_link_local_over_mesh_local_and_global(self):
+        mesh_local = self._addr("fd11112222000000" "0000000000000001")  # fd../8
+        rloc = self._addr("fd1111222233ffff" "00ff00fe001c1d00")
+        link_local = self._addr("fe80000000000000" "3a2f6a1f43067a3a")
+        # 0x3a ^ 0x02 = 0x38
+        assert _ext_from_ipv6([mesh_local, rloc, link_local]) == "382f6a1f43067a3a"
 
-        coord = self._coord_with_client(monkeypatch, read_attribute)
-        node = SimpleNamespace(node_id=5)
-        result = asyncio.run(coord._live_read_op_ext(node, self._clusters(), "X"))
-        assert result == "0badcafe00000001"
+    def test_round_trips_with_factory_address(self):
+        # A device that doesn't randomise: link-local IID derived from the
+        # factory EUI-64 must recover that same address.
+        ext = "228942d83c99f228"
+        iid = bytearray(bytes.fromhex(ext))
+        iid[0] ^= 0x02
+        link_local = b"\xfe\x80" + b"\x00" * 6 + bytes(iid)
+        assert _ext_from_ipv6([link_local]) == ext
 
-    def test_parses_scalar_result(self, monkeypatch):
-        async def read_attribute(node_id, attr_path):
-            return 0x0BADCAFE00000002
+    def test_no_link_local_returns_none(self):
+        mesh_local = self._addr("fd11112222000000" "0000000000000001")
+        assert _ext_from_ipv6([mesh_local]) is None
 
-        coord = self._coord_with_client(monkeypatch, read_attribute)
-        node = SimpleNamespace(node_id=5)
-        result = asyncio.run(coord._live_read_op_ext(node, self._clusters(), "X"))
-        assert result == "0badcafe00000002"
-
-    def test_no_client_returns_none(self, monkeypatch):
-        coord = _build_coordinator()
-        coord.hass = MagicMock()
-        monkeypatch.setattr(coord, "_get_matter_client", lambda: None)
-        node = SimpleNamespace(node_id=5)
-        assert asyncio.run(coord._live_read_op_ext(node, self._clusters(), "X")) is None
-
-    def test_read_failure_returns_none(self, monkeypatch):
-        async def read_attribute(node_id, attr_path):
-            raise RuntimeError("device asleep")
-
-        coord = self._coord_with_client(monkeypatch, read_attribute)
-        node = SimpleNamespace(node_id=5)
-        assert asyncio.run(coord._live_read_op_ext(node, self._clusters(), "X")) is None
-
-    def test_get_matter_client_from_runtime_data(self):
-        coord = _build_coordinator()
-        sentinel = object()
-        entry = SimpleNamespace(
-            entry_id="e1",
-            runtime_data=SimpleNamespace(
-                adapter=SimpleNamespace(matter_client=sentinel)
-            ),
-        )
-        hass = MagicMock()
-        hass.config_entries.async_entries.return_value = [entry]
-        coord.hass = hass
-        assert coord._get_matter_client() is sentinel
-
-    def test_get_matter_client_absent_returns_none(self):
-        coord = _build_coordinator()
-        hass = MagicMock()
-        hass.config_entries.async_entries.return_value = []
-        coord.hass = hass
-        assert coord._get_matter_client() is None
+    def test_empty_and_malformed(self):
+        assert _ext_from_ipv6(None) is None
+        assert _ext_from_ipv6([]) is None
+        assert _ext_from_ipv6([b"\xfe\x80short"]) is None
 
 
 class TestParseRloc16:
