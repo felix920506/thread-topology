@@ -142,6 +142,33 @@ class TestExtFromIPv6:
         assert _ext_from_ipv6([b"\xfe\x80short"]) is None
 
 
+class TestGetMatterClient:
+    """Locating the matter_server client from the Matter config entry."""
+
+    def test_from_runtime_data(self):
+        from types import SimpleNamespace
+
+        coord = _build_coordinator()
+        sentinel = object()
+        entry = SimpleNamespace(
+            entry_id="e1",
+            runtime_data=SimpleNamespace(
+                adapter=SimpleNamespace(matter_client=sentinel)
+            ),
+        )
+        hass = MagicMock()
+        hass.config_entries.async_entries.return_value = [entry]
+        coord.hass = hass
+        assert coord._get_matter_client() is sentinel
+
+    def test_absent_returns_none(self):
+        coord = _build_coordinator()
+        hass = MagicMock()
+        hass.config_entries.async_entries.return_value = []
+        coord.hass = hass
+        assert coord._get_matter_client() is None
+
+
 class TestParseRloc16:
     """Test cases for the rloc16 parser (the API returns hex strings)."""
 

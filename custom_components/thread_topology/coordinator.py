@@ -38,6 +38,11 @@ _LOGGER = logging.getLogger(__name__)
 
 CUSTOM_ROUTERS_FILE = "custom_routers.yaml"
 
+# Per-device timeout for the DEBUG-only live NetworkInterfaces probe. A sleepy
+# device only answers when it next polls its parent; probes run concurrently so
+# this bounds the whole probe pass, not each device.
+LIVE_READ_TIMEOUT = 10
+
 # Known Thread Border Router OUI prefixes (first 6 chars of extended address)
 # These are based on IEEE OUI database and known devices
 KNOWN_BORDER_ROUTER_OUIS = {
@@ -303,6 +308,10 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Get Matter devices and Thread Border Routers from HA device registry
             matter_devices = self._get_matter_devices()
             thread_routers = self._get_thread_border_routers()
+
+            # DEBUG experiment: confirm whether a live read returns a fresher
+            # link-local than HA's cache (no effect on matching).
+            await self._probe_live_link_locals(matter_devices)
 
             # 4. Process and combine data
             topology = self._process_topology(
@@ -745,6 +754,130 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             label, candidates or None, entry.get("transport"),
             entry.get("ext_address"),
         )
+
+    async def _probe_live_link_locals(self, matter_devices: list[dict]) -> None:
+        """DEBUG experiment: does a *live* read return a fresher link-local?
+
+        HA's cached ``NetworkInterfaces`` appears stale for roaming sleepy
+        devices (it derives the factory address, while the mesh uses a different
+        operational address). This live-reads ``NetworkInterfaces`` over the
+        Matter client and logs the link-local before vs after, plus the raw
+        result, so we can confirm whether a live read is worth building on before
+        committing to it. Only runs when DEBUG logging is enabled — a live read
+        blocks on each sleepy device's poll interval, so it must not slow normal
+        operation.
+        """
+        if not _LOGGER.isEnabledFor(logging.DEBUG):
+            return
+        try:
+            from homeassistant.components.matter.helpers import (
+                get_node_from_device_entry,
+            )
+            from chip.clusters import Objects as clusters
+        except Exception:  # noqa: BLE001 - matter/chip may be absent
+            return
+        client = self._get_matter_client()
+        if client is None:
+            _LOGGER.debug("Live link-local probe: no Matter client available")
+            return
+
+        # Only probe Thread devices (Wi-Fi has no Thread link-local to derive).
+        thread_ids = {
+            tuple(idf)
+            for d in matter_devices
+            if d.get("transport") == "thread"
+            for idf in d.get("identifiers", [])
+            if idf and idf[0] == "matter"
+        }
+        if not thread_ids:
+            return
+
+        cluster_id = clusters.GeneralDiagnostics.id
+        attr_id = clusters.GeneralDiagnostics.Attributes.NetworkInterfaces.attribute_id
+        attr_path = f"0/{cluster_id}/{attr_id}"
+
+        def _derive(node: Any) -> str | None:
+            try:
+                ifaces = node.get_attribute_value(
+                    0,
+                    clusters.GeneralDiagnostics,
+                    clusters.GeneralDiagnostics.Attributes.NetworkInterfaces,
+                ) or []
+            except Exception:  # noqa: BLE001
+                return None
+            for iface in ifaces:
+                if not getattr(iface, "isOperational", True):
+                    continue
+                hw = getattr(iface, "hardwareAddress", None)
+                hw_len = len(bytes(hw)) if hw else 0
+                if getattr(iface, "type", None) == 4 or hw_len == 8:
+                    return _ext_from_ipv6(getattr(iface, "IPv6Addresses", None) or [])
+            return None
+
+        device_registry = dr.async_get(self.hass)
+        devices = [
+            device
+            for device in device_registry.devices.values()
+            if any(tuple(idf) in thread_ids for idf in device.identifiers)
+        ]
+
+        async def _probe(device: Any) -> None:
+            label = (
+                getattr(device, "name_by_user", None) or device.name or "Unknown"
+            )
+            try:
+                node = get_node_from_device_entry(self.hass, device)
+            except Exception:  # noqa: BLE001
+                node = None
+            if node is None:
+                return
+            before = _derive(node)
+            try:
+                async with asyncio.timeout(LIVE_READ_TIMEOUT):
+                    raw = await client.read_attribute(node.node_id, attr_path)
+            except Exception as err:  # noqa: BLE001 - device may be asleep
+                _LOGGER.debug(
+                    "Live probe %s: read failed (%s: %s); cached link-local=%s",
+                    label, type(err).__name__, err, before,
+                )
+                return
+            after = _derive(node)
+            raw_str = repr(raw)
+            if len(raw_str) > 600:
+                raw_str = raw_str[:600] + "...<truncated>"
+            _LOGGER.debug(
+                "Live probe %s: link-local cached=%s, after-live-read=%s, "
+                "changed=%s, raw=%s",
+                label, before, after, before != after, raw_str,
+            )
+
+        await asyncio.gather(*(_probe(device) for device in devices))
+
+    def _get_matter_client(self) -> Any | None:
+        """Locate the python-matter-server client from the Matter config entry.
+
+        The client lives on the Matter integration's runtime data (newer HA) or
+        under ``hass.data['matter']`` (older HA); try both and stay defensive
+        because this reaches into another integration's internals.
+        """
+        try:
+            entries = self.hass.config_entries.async_entries("matter")
+        except Exception:  # noqa: BLE001
+            return None
+        for entry in entries:
+            data = getattr(entry, "runtime_data", None)
+            client = getattr(getattr(data, "adapter", None), "matter_client", None)
+            if client is None:
+                domain_data = self.hass.data.get("matter", {})
+                slot = (
+                    domain_data.get(entry.entry_id)
+                    if isinstance(domain_data, dict)
+                    else None
+                )
+                client = getattr(getattr(slot, "adapter", None), "matter_client", None)
+            if client is not None:
+                return client
+        return None
 
     def _get_thread_border_routers(self) -> list[dict[str, Any]]:
         """Get Thread Border Routers from Home Assistant device registry."""
