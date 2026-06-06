@@ -1,6 +1,7 @@
 """Tests for Thread Topology coordinator."""
 from __future__ import annotations
 
+import logging
 import sys
 from unittest.mock import MagicMock
 import pytest
@@ -408,6 +409,102 @@ class TestProcessTopology:
         tree = coordinator.generate_tree({"nodes": {}, "network_name": "Empty"})
         assert tree.startswith("```text")
         assert "no routers found" in tree
+
+
+class TestIdentificationGaps:
+    """Test cases for the device-identification gap warning."""
+
+    NODE = {
+        "networkName": "ha-thread-bac3",
+        "state": "router",
+        "extAddress": "7690F04AB3B4E9DA",
+        "rloc16": "0x3c00",
+        "leaderData": {"leaderRouterId": 15},
+    }
+
+    def _diag(self):
+        # One router whose only child carries an extAddress.
+        return [
+            {
+                "attributes": {
+                    "extAddress": "7690F04AB3B4E9DA",
+                    "rloc16": "0x3c00",
+                    "routerId": 15,
+                    "children": [
+                        {"childId": 1, "rloc16": "0x3c01", "rxOnWhenIdle": False,
+                         "extAddress": "AAAA000000000001"},
+                    ],
+                }
+            }
+        ]
+
+    def test_warns_thread_node_not_in_ha(self, caplog):
+        coordinator = _build_coordinator()
+        with caplog.at_level(logging.WARNING):
+            coordinator._process_topology(self.NODE, self._diag(), [], [])
+        msg = caplog.text
+        assert "identification gaps" in msg
+        # The unmatched child (extAddress) and router are both reported.
+        assert "AAAA000000000001" in msg
+        assert "On Thread but NOT matched" in msg
+
+    def test_warns_ha_device_not_on_thread(self, caplog):
+        coordinator = _build_coordinator()
+        matter = [
+            {"name": "Ghost Sensor", "transport": "thread",
+             "ext_address": "deadbeef00000009"},
+        ]
+        with caplog.at_level(logging.WARNING):
+            coordinator._process_topology(self.NODE, self._diag(), matter, [])
+        msg = caplog.text
+        assert "NOT found on the mesh" in msg
+        assert "Ghost Sensor" in msg
+        assert "DEADBEEF00000009" in msg
+
+    def test_warns_ha_device_without_ext_address(self, caplog):
+        coordinator = _build_coordinator()
+        matter = [
+            {"name": "Unenriched Sensor", "transport": "thread",
+             "ext_address": None},
+        ]
+        with caplog.at_level(logging.WARNING):
+            coordinator._process_topology(self.NODE, self._diag(), matter, [])
+        msg = caplog.text
+        assert "no extended address" in msg
+        assert "Unenriched Sensor" in msg
+
+    def test_warns_child_without_ext_address(self, caplog):
+        coordinator = _build_coordinator()
+        # childTable has no extAddress, so the child can never be matched.
+        diag = [
+            {
+                "attributes": {
+                    "extAddress": "7690F04AB3B4E9DA",
+                    "rloc16": "0x3c00",
+                    "routerId": 15,
+                    "childTable": [
+                        {"childId": 1, "timeout": 12,
+                         "mode": {"rxOnWhenIdle": False}},
+                    ],
+                }
+            }
+        ]
+        with caplog.at_level(logging.WARNING):
+            coordinator._process_topology(self.NODE, diag, [], [])
+        assert "Thread children with no extAddress" in caplog.text
+
+    def test_no_warning_when_everything_matches(self, caplog):
+        coordinator = _build_coordinator()
+        # The router and its child both match a Home Assistant Matter device.
+        matter = [
+            {"name": "The Router", "transport": "thread",
+             "ext_address": "7690f04ab3b4e9da"},
+            {"name": "The Child", "transport": "thread",
+             "ext_address": "aaaa000000000001"},
+        ]
+        with caplog.at_level(logging.WARNING):
+            coordinator._process_topology(self.NODE, self._diag(), matter, [])
+        assert "identification gaps" not in caplog.text
 
 
 class TestBorderRouterIdentification:

@@ -993,6 +993,10 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ) or [],
             }
 
+        # Surface any device-identification gaps for debugging (Thread nodes that
+        # don't match a Home Assistant device, and vice versa).
+        self._log_identification_gaps(nodes, thread_matter)
+
         return {
             "network_name": network_name,
             "state": state,
@@ -1007,6 +1011,104 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             },
             "known_routers": thread_routers,
         }
+
+    @staticmethod
+    def _log_identification_gaps(
+        nodes: dict[str, dict], thread_matter: list[dict]
+    ) -> None:
+        """Warn when Thread nodes and HA Matter devices don't line up.
+
+        Naming relies on matching a Thread node's extended address (the "MAC" on
+        the Matter info panel) to a Home Assistant Matter device's extended
+        address. When a node ends up unidentified it is almost always because the
+        two sides don't share an extended address, so log both directions of the
+        mismatch — plus the cases where a match is structurally impossible (a
+        Thread child with no extAddress, or an HA device whose Matter enrichment
+        produced no extAddress) — with the rloc16/extAddress needed to chase it
+        through the OTBR ``/api/diagnostics`` REST API.
+        """
+        # Thread side: routers + children that carry an extended address.
+        thread_by_ext: dict[str, str] = {}
+        children_without_ext: list[str] = []
+        for node in nodes.values():
+            r_ext_raw = node.get("ext_address", "")
+            r_ext = _normalize_address(r_ext_raw)
+            if r_ext:
+                thread_by_ext[r_ext] = (
+                    f"{r_ext_raw} (router, rloc16 0x{node.get('rloc16', 0):04x}, "
+                    f"role {node.get('role')}, shown as '{node.get('name')}')"
+                )
+            for child in node.get("children", []):
+                c_ext_raw = child.get("ext_address", "")
+                c_ext = _normalize_address(c_ext_raw)
+                where = (
+                    f"child rloc16 0x{child.get('rloc16', 0):04x} "
+                    f"({child.get('type')}) under router "
+                    f"0x{node.get('rloc16', 0):04x}"
+                )
+                if c_ext:
+                    thread_by_ext[c_ext] = f"{c_ext_raw} ({where})"
+                else:
+                    children_without_ext.append(where)
+
+        # Home Assistant side: Matter-over-Thread devices.
+        ha_by_ext: dict[str, str] = {}
+        ha_without_ext: list[str] = []
+        for device in thread_matter:
+            ext_raw = device.get("ext_address")
+            name = device.get("name", "Unknown")
+            if ext_raw:
+                ha_by_ext[_normalize_address(ext_raw)] = name
+            else:
+                ha_without_ext.append(name)
+
+        thread_only = [
+            desc for ext, desc in sorted(thread_by_ext.items())
+            if ext not in ha_by_ext
+        ]
+        ha_only = [
+            f"{name} (extAddress {ext})"
+            for ext, name in sorted(ha_by_ext.items())
+            if ext not in thread_by_ext
+        ]
+
+        if not (thread_only or ha_only or children_without_ext or ha_without_ext):
+            return
+
+        lines = [
+            "Thread topology device identification gaps "
+            "(nodes are matched to Home Assistant by extended address):"
+        ]
+        if thread_only:
+            lines.append(
+                f"  On Thread but NOT matched to a Home Assistant device "
+                f"({len(thread_only)}):"
+            )
+            lines += [f"    - {item}" for item in thread_only]
+        if ha_only:
+            lines.append(
+                f"  In Home Assistant (Matter/Thread) but NOT found on the mesh "
+                f"({len(ha_only)}):"
+            )
+            lines += [f"    - {item}" for item in ha_only]
+        if children_without_ext:
+            lines.append(
+                f"  Thread children with no extAddress, so they can never be "
+                f"matched (the OTBR 'children' TLV was missing for their parent; "
+                f"only the legacy childTable was returned) "
+                f"({len(children_without_ext)}):"
+            )
+            lines += [f"    - {item}" for item in children_without_ext]
+        if ha_without_ext:
+            lines.append(
+                f"  Home Assistant Matter/Thread devices with no extended address, "
+                f"so they can never be matched (Matter enrichment failed — the "
+                f"GeneralDiagnostics network interface was unreadable) "
+                f"({len(ha_without_ext)}):"
+            )
+            lines += [f"    - {item}" for item in ha_without_ext]
+
+        _LOGGER.warning("\n".join(lines))
 
     def generate_tree(self, topology: dict[str, Any]) -> str:
         """Build a monospace ASCII tree diagram of the topology.
