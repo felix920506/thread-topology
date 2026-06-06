@@ -160,28 +160,6 @@ def _link_quality_from_margin(margin: Any) -> int:
     return 0
 
 
-def _diag_richness(attrs: dict[str, Any]) -> int:
-    """Score a diagnostic snapshot so the most useful one per router wins.
-
-    The OTBR ``/api/diagnostics`` collection accumulates many snapshots per
-    router, and a router's *most recent* snapshot can be a degraded one (e.g.
-    missing the route table and with an empty neighbour list) while an earlier
-    snapshot is complete. De-duplicating by "last wins" would then drop a router
-    to looking isolated, so prefer whichever snapshot carries the most topology
-    data instead.
-    """
-    score = 0
-    if _first(attrs, "route", "route64"):
-        score += 8
-    if _first(attrs, "children"):
-        score += 4
-    if attrs.get("routerNeighbors"):
-        score += 2
-    if attrs.get("childTable"):
-        score += 1
-    return score
-
-
 class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator to fetch Thread topology data from OTBR."""
 
@@ -809,21 +787,29 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Index diagnostics by normalized extended address, and build the router
         # set from the live diagnostics entries only. The collection holds many
-        # snapshots per router; keep the richest one (see ``_diag_richness``) so a
-        # router isn't dropped to looking isolated just because its most recent
-        # snapshot happened to be a degraded/partial one.
+        # snapshots per router; the *freshest* (last) snapshot is authoritative
+        # for the router's identity, children and naming, because older snapshots
+        # carry stale children (e.g. roaming sleepy devices, double-counted across
+        # parents) and lack the extAddress needed to name them.
+        #
+        # Connectivity is tracked separately (``conn_by_ext``): a router's freshest
+        # snapshot can be degraded (no route table, empty neighbour list) while an
+        # earlier one still has its mesh links, so for links/link-quality fall back
+        # to the most recent snapshot that actually carries them. This keeps live
+        # routers from rendering isolated without resurrecting their stale children.
         diag_by_ext: dict[str, dict] = {}
         router_exts: dict[str, str] = {}
+        conn_by_ext: dict[str, dict] = {}
         for diag in diagnostics:
             attrs = diag.get("attributes", {})
             ext = _first(attrs, "extAddress", "extaddress", default="") or diag.get("id", "")
             if not ext:
                 continue
             norm = _normalize_address(ext)
-            existing = diag_by_ext.get(norm)
-            if existing is None or _diag_richness(attrs) >= _diag_richness(existing):
-                diag_by_ext[norm] = attrs
-                router_exts[norm] = ext
+            diag_by_ext[norm] = attrs
+            router_exts[norm] = ext
+            if _first(attrs, "route", "route64") or attrs.get("routerNeighbors"):
+                conn_by_ext[norm] = attrs
 
         def _router_id(attrs: dict, rloc_int: int) -> int | None:
             rid = _first(attrs, "routerId", default=None)
@@ -869,18 +855,23 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             router_index += 1
 
+            # Connectivity (route table + MAC neighbours) is read from the most
+            # recent snapshot that actually carries it, which may be older than the
+            # freshest snapshot used for everything else above.
+            conn_diag = conn_by_ext.get(norm_ext, diag)
+
             # Route table (the build names this TLV "route"; "route64" on others)
-            route = _first(diag, "route", "route64", default={}) or {}
+            route = _first(conn_diag, "route", "route64", default={}) or {}
             route_data = _first(route, "routeData", "routes", default=[]) or []
 
             # MAC neighbour table: this build (and some routers whose full route
             # TLV never comes back) report their live mesh links here, as a link
             # margin in dB rather than a 0-3 quality.
-            router_neighbors = _first(diag, "routerNeighbors", default=[]) or []
+            router_neighbors = _first(conn_diag, "routerNeighbors", default=[]) or []
 
             # Link quality: prefer a connectivity TLV when present, otherwise
             # derive it from the best inbound link to a neighbouring router.
-            connectivity = _first(diag, "connectivity", default={}) or {}
+            connectivity = _first(conn_diag, "connectivity", default={}) or {}
             leader_cost = _first(connectivity, "leaderCost", default=0)
             if connectivity:
                 lq3 = _first(connectivity, "linkQuality3", default=0)

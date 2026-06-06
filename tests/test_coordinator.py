@@ -220,12 +220,15 @@ class TestProcessTopology:
         # link quality is derived from the best neighbour margin, not Unknown
         assert node["link_quality"] == 3
 
-    def test_richest_snapshot_wins_over_freshest(self, mock_otbr_node_response):
-        """A degraded later snapshot must not shadow an earlier complete one.
+    def test_connectivity_falls_back_to_older_snapshot(
+        self, mock_otbr_node_response
+    ):
+        """A degraded latest snapshot still shows links from an earlier one.
 
-        The OTBR diagnostics collection accumulates many snapshots per router; a
-        router's most recent one can be empty (no route, no neighbours). De-dup
-        must keep the richest snapshot, not the last one.
+        The diagnostics collection accumulates many snapshots per router; the
+        most recent can be empty (no route, no neighbours). Connectivity must
+        fall back to the most recent snapshot that actually carries it, so the
+        router isn't drawn isolated.
         """
         coordinator = _build_coordinator()
         node_attrs = ThreadTopologyCoordinator._resource_attributes(
@@ -252,7 +255,56 @@ class TestProcessTopology:
         ]
         topo = coordinator._process_topology(node_attrs, diagnostics, [], [])
         node = topo["nodes"]["3ECD5E8D98957D8A"]
-        # The richer snapshot's neighbour (0xf400 -> rid 61) survives.
+        # The earlier snapshot's neighbour (0xf400 -> rid 61) survives.
+        assert {c["router_id"] for c in node["connections"]} == {61}
+
+    def test_freshest_snapshot_wins_for_children(self, mock_otbr_node_response):
+        """Children/identity come from the freshest snapshot, not an older one.
+
+        Older snapshots carry stale children (roaming sleepy devices) that would
+        inflate the device count and can't be named (childTable has no
+        extAddress), so the latest snapshot must win for child data even when an
+        earlier snapshot is "richer".
+        """
+        coordinator = _build_coordinator()
+        node_attrs = ThreadTopologyCoordinator._resource_attributes(
+            mock_otbr_node_response
+        )
+        diagnostics = [
+            {
+                # Older, richer-looking snapshot with two (now stale) children.
+                "attributes": {
+                    "extAddress": "3ECD5E8D98957D8A",
+                    "rloc16": "0x2400",
+                    "routerId": 9,
+                    "route": {"routeData": [
+                        {"routeId": 61, "linkQualityIn": 3, "linkQualityOut": 3,
+                         "routeCost": 1},
+                    ]},
+                    "childTable": [
+                        {"childId": 1, "timeout": 12,
+                         "mode": {"rxOnWhenIdle": False}},
+                        {"childId": 3, "timeout": 12,
+                         "mode": {"rxOnWhenIdle": False}},
+                    ],
+                }
+            },
+            {
+                # Freshest snapshot: the children have left, links absent.
+                "attributes": {
+                    "extAddress": "3ECD5E8D98957D8A",
+                    "rloc16": "0x2400",
+                    "routerId": 9,
+                    "childTable": [],
+                    "routerNeighbors": [],
+                }
+            },
+        ]
+        topo = coordinator._process_topology(node_attrs, diagnostics, [], [])
+        node = topo["nodes"]["3ECD5E8D98957D8A"]
+        # No stale children resurrected...
+        assert node["child_count"] == 0
+        # ...but connectivity still falls back to the older route table.
         assert {c["router_id"] for c in node["connections"]} == {61}
 
     def test_child_rloc16_computed(self, topology):
