@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -178,6 +178,43 @@ def _ext_to_hex(value: Any) -> str | None:
     if isinstance(value, str):
         norm = _normalize_address(value)
         return norm.lower() if len(norm) == 16 else None
+    return None
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _parse_created(value: Any) -> datetime:
+    """Parse an OTBR diagnostic ``created`` timestamp; fall back to the epoch.
+
+    OTBR retains every diagnostic snapshot it has ever taken (in no particular
+    order), so the freshest is found by ``created`` rather than position.
+    """
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return _EPOCH
+
+
+def _rloc_from_ipv6(addresses: Any) -> int | None:
+    """Extract a node's RLOC16 from its mesh-local RLOC IPv6 address.
+
+    A Thread node's RLOC address carries the interface identifier
+    ``0000:00ff:fe00:RLOC16`` under the mesh-local prefix, so the last two bytes
+    are the rloc16. This is the only address a randomising sleepy device shares
+    with the mesh's view of it (its 802.15.4 extended address differs from its
+    Matter EUI-64), so it is the join key of last resort.
+    """
+    for addr in addresses or []:
+        try:
+            b = bytes(addr)
+        except (TypeError, ValueError):
+            continue
+        if len(b) == 16 and b[8:14] == b"\x00\x00\x00\xff\xfe\x00":
+            return (b[14] << 8) | b[15]
     return None
 
 
@@ -607,6 +644,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "transport": None,
                         "ext_address": None,
                         "ext_addresses": [],
+                        "rloc16": None,
                     }
 
                     # Enrich with Thread address/role from the Matter node
@@ -718,6 +756,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if itype == 4 or len(hw_bytes) == 8:
                 hw_hex = hw_bytes.hex()
                 op_hex = _ext_from_ipv6(ipv6)
+                entry["rloc16"] = _rloc_from_ipv6(ipv6)
                 entry["transport"] = "thread"
                 break
             if itype in (1, 2):  # WiFi / Ethernet
@@ -741,8 +780,9 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             entry["ext_address"] = candidates[0]
 
         _LOGGER.debug(
-            "Matter enrich %s: candidates=%s transport=%s (preferred=%s)",
+            "Matter enrich %s: candidates=%s transport=%s rloc16=%s (preferred=%s)",
             label, candidates or None, entry.get("transport"),
+            f"0x{entry['rloc16']:04x}" if isinstance(entry.get("rloc16"), int) else None,
             entry.get("ext_address"),
         )
 
@@ -909,6 +949,21 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if ext:
                     matter_by_ext[_normalize_address(ext)] = d["name"]
 
+        # Fallback join key: a device's own RLOC16 (from its Matter IPv6) -> name.
+        # Devices that randomise their 802.15.4 extended address never share an
+        # extAddress with the mesh, but their RLOC16 maps to the mesh child at the
+        # matching (router, childId). RLOCs are reassigned on roam, so this is a
+        # best-effort fallback after extAddress.
+        matter_by_rloc: dict[int, str] = {}
+        for d in matter_devices:
+            r = d.get("rloc16")
+            if isinstance(r, int):
+                matter_by_rloc[r] = d["name"]
+
+        # Names successfully attached to a mesh node/child, so the reverse gap
+        # (HA devices not found on the mesh) reflects both match methods.
+        matched_ha_names: set[str] = set()
+
         # Index diagnostics by normalized extended address, and build the router
         # set from the live diagnostics entries only. The collection holds many
         # snapshots per router; the *freshest* (last) snapshot is authoritative
@@ -957,18 +1012,33 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
 
         diag_by_ext: dict[str, dict] = {}
+        diag_created: dict[str, datetime] = {}
         router_exts: dict[str, str] = {}
         conn_by_ext: dict[str, dict] = {}
+        conn_created: dict[str, datetime] = {}
         for diag in diagnostics:
             attrs = diag.get("attributes", {})
             ext = _first(attrs, "extAddress", "extaddress", default="") or diag.get("id", "")
             if not ext:
                 continue
             norm = _normalize_address(ext)
-            diag_by_ext[norm] = attrs
-            router_exts[norm] = ext
+            created = _parse_created(attrs.get("created"))
+            # Keep the *freshest* snapshot per router. The collection accumulates
+            # many snapshots in no chronological order; an older one carries stale
+            # children (e.g. roaming sleepy devices that have since left), so
+            # selecting by ``created`` — not list position — is what stops day-old
+            # phantom children from showing.
+            if created >= diag_created.get(norm, _EPOCH):
+                diag_by_ext[norm] = attrs
+                diag_created[norm] = created
+                router_exts[norm] = ext
+            # Connectivity is tracked separately: the freshest snapshot may be
+            # degraded (no route/neighbour table), so keep the freshest one that
+            # actually carries links.
             if _first(attrs, "route", "route64") or attrs.get("routerNeighbors"):
-                conn_by_ext[norm] = attrs
+                if created >= conn_created.get(norm, _EPOCH):
+                    conn_by_ext[norm] = attrs
+                    conn_created[norm] = created
 
         def _router_id(attrs: dict, rloc_int: int) -> int | None:
             rid = _first(attrs, "routerId", default=None)
@@ -1005,10 +1075,15 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # HA OTBR build doesn't expose the full /api/* diagnostics, so a
             # separate OTBR is usually queried), so just flag it, don't name it.
             is_queried_otbr = norm_ext == self_ext and bool(self_ext)
+            router_matter_name = matter_by_ext.get(norm_ext) or matter_by_rloc.get(
+                rloc_int
+            )
+            if router_matter_name:
+                matched_ha_names.add(router_matter_name)
             router_info = self._identify_router(
                 ext_address,
                 router_index,
-                matter_by_ext.get(norm_ext),
+                router_matter_name,
                 _first(diag, "vendorName", default=""),
                 _first(diag, "vendorModel", default=""),
             )
@@ -1099,11 +1174,18 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "ext_address": child_ext,
                 }
                 # Name the child by matching its extended address to a Home
-                # Assistant Matter device.
-                if child_ext:
-                    child_name = matter_by_ext.get(_normalize_address(child_ext))
-                    if child_name:
-                        child_info["name"] = child_name
+                # Assistant Matter device; fall back to its RLOC16 for devices
+                # whose mesh MAC differs from their Matter EUI-64.
+                child_name = (
+                    matter_by_ext.get(_normalize_address(child_ext))
+                    if child_ext
+                    else None
+                )
+                if not child_name and child_rloc is not None:
+                    child_name = matter_by_rloc.get(child_rloc)
+                if child_name:
+                    child_info["name"] = child_name
+                    matched_ha_names.add(child_name)
                 children.append(child_info)
 
             # Mesh connections from the route table (skip the self entry)
@@ -1165,7 +1247,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Surface any device-identification gaps for debugging (Thread nodes that
         # don't match a Home Assistant device, and vice versa).
-        self._log_identification_gaps(nodes, thread_matter)
+        self._log_identification_gaps(nodes, thread_matter, matched_ha_names)
 
         return {
             "network_name": network_name,
@@ -1184,117 +1266,74 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @staticmethod
     def _log_identification_gaps(
-        nodes: dict[str, dict], thread_matter: list[dict]
+        nodes: dict[str, dict],
+        thread_matter: list[dict],
+        matched_ha_names: set[str],
     ) -> None:
         """Warn when Thread nodes and HA Matter devices don't line up.
 
-        Naming relies on matching a Thread node's extended address (the "MAC" on
-        the Matter info panel) to a Home Assistant Matter device's extended
-        address. When a node ends up unidentified it is almost always because the
-        two sides don't share an extended address, so log both directions of the
-        mismatch — plus the cases where a match is structurally impossible (a
-        Thread child with no extAddress, or an HA device whose Matter enrichment
-        produced no extAddress) — with the rloc16/extAddress needed to chase it
-        through the OTBR ``/api/diagnostics`` REST API.
+        A mesh node/child is named from a Home Assistant Matter device by its
+        extended address, then by its RLOC16/childId (for devices whose mesh MAC
+        differs from their Matter EUI-64). ``matched_ha_names`` is the set of HA
+        names that got attached by either method. Report both directions:
+
+        - mesh routers/children that ended up unnamed (with the rloc16/extAddress
+          needed to chase them through the OTBR ``/api/diagnostics`` REST API), and
+        - HA Matter/Thread devices that matched nothing on the mesh (with the
+          extAddress *and* rloc16 used as join keys).
         """
-        # Thread side: routers + children that carry an extended address.
-        # ``identified_routers`` are routers already named by vendor/OUI/custom
-        # data (e.g. border routers) — they aren't Matter devices and aren't the
-        # "unidentified" case, so they're tracked (to keep the reverse direction
-        # correct) but excluded from the gap list.
-        thread_by_ext: dict[str, str] = {}
-        identified_routers: set[str] = set()
-        children_without_ext: list[str] = []
+        thread_only: list[str] = []
         for node in nodes.values():
-            r_ext_raw = node.get("ext_address", "")
-            r_ext = _normalize_address(r_ext_raw)
             name = node.get("name", "") or ""
-            if r_ext:
-                thread_by_ext[r_ext] = (
-                    f"{r_ext_raw} (router, rloc16 0x{node.get('rloc16', 0):04x}, "
-                    f"role {node.get('role')}, shown as '{name}')"
+            # Routers named only by a generic placeholder are unidentified.
+            if name.startswith("Thread Router ("):
+                thread_only.append(
+                    f"router rloc16 0x{node.get('rloc16', 0):04x} "
+                    f"(extAddress {node.get('ext_address') or 'none'})"
                 )
-                if not name.startswith("Thread Router ("):
-                    identified_routers.add(r_ext)
             for child in node.get("children", []):
-                c_ext_raw = child.get("ext_address", "")
-                c_ext = _normalize_address(c_ext_raw)
-                where = (
+                if child.get("name"):
+                    continue
+                thread_only.append(
                     f"child rloc16 0x{child.get('rloc16', 0):04x} "
                     f"({child.get('type')}) under router "
-                    f"0x{node.get('rloc16', 0):04x}"
+                    f"0x{node.get('rloc16', 0):04x} "
+                    f"(extAddress {child.get('ext_address') or 'none'})"
                 )
-                if c_ext:
-                    thread_by_ext[c_ext] = f"{c_ext_raw} ({where})"
-                else:
-                    children_without_ext.append(where)
 
-        # Home Assistant side: Matter-over-Thread devices. A device may present
-        # several candidate addresses (operational vs hardware); it matches the
-        # mesh if any candidate is present, and all candidates are shown so a true
-        # mismatch can be debugged against OTBR.
-        ha_addrs: list[tuple[str, list[str]]] = []  # (name, normalized candidates)
-        ha_without_ext: list[str] = []
+        ha_only: list[str] = []
         for device in thread_matter:
             name = device.get("name", "Unknown")
+            if name in matched_ha_names:
+                continue
             exts = device.get("ext_addresses") or (
                 [device["ext_address"]] if device.get("ext_address") else []
             )
-            cands = [_normalize_address(e) for e in exts if e]
-            if cands:
-                ha_addrs.append((name, cands))
-            else:
-                ha_without_ext.append(name)
+            rloc = device.get("rloc16")
+            rloc_txt = f"0x{rloc:04x}" if isinstance(rloc, int) else "unknown"
+            ha_only.append(
+                f"{name} (extAddress {'/'.join(exts) or 'none'}, rloc16 {rloc_txt})"
+            )
 
-        ha_by_ext: dict[str, str] = {
-            ext: name for name, cands in ha_addrs for ext in cands
-        }
-
-        thread_only = [
-            desc for ext, desc in sorted(thread_by_ext.items())
-            if ext not in ha_by_ext and ext not in identified_routers
-        ]
-        ha_only = [
-            f"{name} (extAddress {'/'.join(cands)})"
-            for name, cands in sorted(ha_addrs)
-            if not any(ext in thread_by_ext for ext in cands)
-        ]
-
-        if not (thread_only or ha_only or children_without_ext or ha_without_ext):
+        if not (thread_only or ha_only):
             return
 
         lines = [
             "Thread topology device identification gaps "
-            "(nodes are matched to Home Assistant by extended address):"
+            "(matched by extended address, then by RLOC16/childId):"
         ]
         if thread_only:
             lines.append(
                 f"  On Thread but NOT matched to a Home Assistant device "
                 f"({len(thread_only)}):"
             )
-            lines += [f"    - {item}" for item in thread_only]
+            lines += [f"    - {item}" for item in sorted(thread_only)]
         if ha_only:
             lines.append(
                 f"  In Home Assistant (Matter/Thread) but NOT found on the mesh "
                 f"({len(ha_only)}):"
             )
-            lines += [f"    - {item}" for item in ha_only]
-        if children_without_ext:
-            lines.append(
-                f"  Thread children with no extAddress, so they can never be "
-                f"matched (the OTBR 'children' TLV was missing for their parent; "
-                f"only the legacy childTable was returned) "
-                f"({len(children_without_ext)}):"
-            )
-            lines += [f"    - {item}" for item in children_without_ext]
-        if ha_without_ext:
-            lines.append(
-                f"  Home Assistant Matter/Thread devices with no extended address, "
-                f"so they can never be matched (Matter enrichment failed — the "
-                f"GeneralDiagnostics network interface was unreadable) "
-                f"({len(ha_without_ext)}):"
-            )
-            lines += [f"    - {item}" for item in ha_without_ext]
+            lines += [f"    - {item}" for item in sorted(ha_only)]
 
         _LOGGER.warning("\n".join(lines))
 

@@ -540,7 +540,7 @@ class TestIdentificationGaps:
         msg = caplog.text
         assert "NOT found on the mesh" in msg
         assert "Ghost Sensor" in msg
-        assert "DEADBEEF00000009" in msg
+        assert "deadbeef00000009" in msg
 
     def test_warns_ha_device_without_ext_address(self, caplog):
         coordinator = _build_coordinator()
@@ -551,12 +551,13 @@ class TestIdentificationGaps:
         with caplog.at_level(logging.WARNING):
             coordinator._process_topology(self.NODE, self._diag(), matter, [])
         msg = caplog.text
-        assert "no extended address" in msg
+        assert "NOT found on the mesh" in msg
         assert "Unenriched Sensor" in msg
+        assert "extAddress none" in msg
 
     def test_warns_child_without_ext_address(self, caplog):
         coordinator = _build_coordinator()
-        # childTable has no extAddress, so the child can never be matched.
+        # childTable has no extAddress, so the child can only match by RLOC.
         diag = [
             {
                 "attributes": {
@@ -572,7 +573,70 @@ class TestIdentificationGaps:
         ]
         with caplog.at_level(logging.WARNING):
             coordinator._process_topology(self.NODE, diag, [], [])
-        assert "Thread children with no extAddress" in caplog.text
+        msg = caplog.text
+        assert "On Thread but NOT matched" in msg
+        # child rloc16 = parent 0x3c00 | childId 1 = 0x3c01, no extAddress
+        assert "0x3c01" in msg
+        assert "extAddress none" in msg
+
+    def test_child_matched_by_rloc16(self, caplog):
+        coordinator = _build_coordinator()
+        # childTable child (no extAddress) is named by RLOC16: parent 0x3c00 |
+        # childId 1 = 0x3c01, matching an HA device whose self-RLOC is 0x3c01.
+        diag = [
+            {
+                "attributes": {
+                    "extAddress": "7690F04AB3B4E9DA",
+                    "rloc16": "0x3c00",
+                    "routerId": 15,
+                    "childTable": [
+                        {"childId": 1, "timeout": 12,
+                         "mode": {"rxOnWhenIdle": False}},
+                    ],
+                }
+            }
+        ]
+        matter = [
+            {"name": "Door Sensor", "transport": "thread",
+             "ext_address": "1a9ef8848ed0965b", "rloc16": 0x3c01},
+        ]
+        with caplog.at_level(logging.WARNING):
+            topo = coordinator._process_topology(self.NODE, diag, matter, [])
+        child = topo["nodes"]["7690F04AB3B4E9DA"]["children"][0]
+        assert child["name"] == "Door Sensor"
+        # Matched by RLOC, so not reported as a gap.
+        assert "Door Sensor" not in caplog.text
+
+    def test_prefers_newest_snapshot_by_created(self):
+        coordinator = _build_coordinator()
+        # Two snapshots for the same router; the OLDER one is last in the list
+        # (as OTBR returns them) and carries a stale child. The newer one must win.
+        diag = [
+            {
+                "attributes": {
+                    "extAddress": "7690F04AB3B4E9DA", "rloc16": "0x3c00",
+                    "routerId": 15, "created": "2026-06-06T04:00:00+00:00",
+                    "children": [
+                        {"childId": 2, "rloc16": "0x3c02", "rxOnWhenIdle": False,
+                         "extAddress": "AAAA000000000002"},
+                    ],
+                }
+            },
+            {
+                "attributes": {
+                    "extAddress": "7690F04AB3B4E9DA", "rloc16": "0x3c00",
+                    "routerId": 15, "created": "2026-06-01T19:00:00+00:00",
+                    "children": [
+                        {"childId": 1, "rloc16": "0x3c01", "rxOnWhenIdle": False,
+                         "extAddress": "STALE000000000001"},
+                    ],
+                }
+            },
+        ]
+        topo = coordinator._process_topology(self.NODE, diag, [], [])
+        children = topo["nodes"]["7690F04AB3B4E9DA"]["children"]
+        exts = {c["ext_address"] for c in children}
+        assert exts == {"AAAA000000000002"}  # newest snapshot, not the stale one
 
     def test_no_warning_when_everything_matches(self, caplog):
         coordinator = _build_coordinator()
