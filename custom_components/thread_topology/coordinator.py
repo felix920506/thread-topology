@@ -921,6 +921,41 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # earlier one still has its mesh links, so for links/link-quality fall back
         # to the most recent snapshot that actually carries them. This keeps live
         # routers from rendering isolated without resurrecting their stale children.
+        # DEBUG: the collection holds many snapshots per router and we keep only
+        # the last seen per extAddress (line below). Surface the full picture —
+        # how many snapshots per router, their created time, and which carry a
+        # "children" field (the source of child extAddresses) vs only the legacy
+        # "childTable" — so child-naming gaps can be traced to a stale/wrong
+        # snapshot winning, or to OTBR returning phantom children.
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            from collections import defaultdict
+
+            snaps: dict[str, list] = defaultdict(list)
+            for diag in diagnostics:
+                a = diag.get("attributes", {})
+                e = _first(a, "extAddress", "extaddress", default="") or diag.get("id", "")
+                ch = a.get("children")
+                snaps[_normalize_address(e)].append(
+                    {
+                        "rloc16": _first(a, "rloc16", default="?"),
+                        "created": a.get("created"),
+                        "childTable_ids": [
+                            _first(c, "childId", default=None)
+                            for c in (a.get("childTable") or [])
+                        ],
+                        "children_ext": (
+                            [_first(c, "extAddress", default=None) for c in ch]
+                            if ch is not None
+                            else None
+                        ),
+                    }
+                )
+            for ne, entries in snaps.items():
+                _LOGGER.debug(
+                    "OTBR snapshots for ext %s: %d snapshot(s) %s",
+                    ne, len(entries), entries,
+                )
+
         diag_by_ext: dict[str, dict] = {}
         router_exts: dict[str, str] = {}
         conn_by_ext: dict[str, dict] = {}
