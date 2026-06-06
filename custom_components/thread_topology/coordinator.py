@@ -140,6 +140,48 @@ def _parse_rloc16(value: Any) -> int | None:
     return None
 
 
+def _link_quality_from_margin(margin: Any) -> int:
+    """Map a link margin (dB) to a Thread link quality (0-3).
+
+    ``routerNeighbors`` reports a neighbour's link as a margin in dB rather than
+    a 0-3 quality, so convert it using OpenThread's standard thresholds (link
+    quality 1/2/3 at >= 2/10/20 dB).
+    """
+    try:
+        m = float(margin)
+    except (TypeError, ValueError):
+        return 0
+    if m >= 20:
+        return 3
+    if m >= 10:
+        return 2
+    if m >= 2:
+        return 1
+    return 0
+
+
+def _diag_richness(attrs: dict[str, Any]) -> int:
+    """Score a diagnostic snapshot so the most useful one per router wins.
+
+    The OTBR ``/api/diagnostics`` collection accumulates many snapshots per
+    router, and a router's *most recent* snapshot can be a degraded one (e.g.
+    missing the route table and with an empty neighbour list) while an earlier
+    snapshot is complete. De-duplicating by "last wins" would then drop a router
+    to looking isolated, so prefer whichever snapshot carries the most topology
+    data instead.
+    """
+    score = 0
+    if _first(attrs, "route", "route64"):
+        score += 8
+    if _first(attrs, "children"):
+        score += 4
+    if attrs.get("routerNeighbors"):
+        score += 2
+    if attrs.get("childTable"):
+        score += 1
+    return score
+
+
 class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator to fetch Thread topology data from OTBR."""
 
@@ -765,21 +807,23 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if ext:
                 matter_by_ext[_normalize_address(ext)] = d["name"]
 
-        # Index diagnostics by normalized extended address
+        # Index diagnostics by normalized extended address, and build the router
+        # set from the live diagnostics entries only. The collection holds many
+        # snapshots per router; keep the richest one (see ``_diag_richness``) so a
+        # router isn't dropped to looking isolated just because its most recent
+        # snapshot happened to be a degraded/partial one.
         diag_by_ext: dict[str, dict] = {}
-        for diag in diagnostics:
-            attrs = diag.get("attributes", {})
-            ext = _first(attrs, "extAddress", "extaddress", default="") or diag.get("id", "")
-            if ext:
-                diag_by_ext[_normalize_address(ext)] = attrs
-
-        # Build the router set from the live diagnostics entries only.
         router_exts: dict[str, str] = {}
         for diag in diagnostics:
             attrs = diag.get("attributes", {})
             ext = _first(attrs, "extAddress", "extaddress", default="") or diag.get("id", "")
-            if ext:
-                router_exts.setdefault(_normalize_address(ext), ext)
+            if not ext:
+                continue
+            norm = _normalize_address(ext)
+            existing = diag_by_ext.get(norm)
+            if existing is None or _diag_richness(attrs) >= _diag_richness(existing):
+                diag_by_ext[norm] = attrs
+                router_exts[norm] = ext
 
         def _router_id(attrs: dict, rloc_int: int) -> int | None:
             rid = _first(attrs, "routerId", default=None)
@@ -829,6 +873,11 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             route = _first(diag, "route", "route64", default={}) or {}
             route_data = _first(route, "routeData", "routes", default=[]) or []
 
+            # MAC neighbour table: this build (and some routers whose full route
+            # TLV never comes back) report their live mesh links here, as a link
+            # margin in dB rather than a 0-3 quality.
+            router_neighbors = _first(diag, "routerNeighbors", default=[]) or []
+
             # Link quality: prefer a connectivity TLV when present, otherwise
             # derive it from the best inbound link to a neighbouring router.
             connectivity = _first(diag, "connectivity", default={}) or {}
@@ -845,6 +894,11 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if _first(rd, "routeId", "routerId", default=None) != router_id
                 ]
                 link_quality = min(max(neighbour_lq), 3) if neighbour_lq else 0
+            elif router_neighbors:
+                margins = [
+                    _first(n, "linkMargin", default=0) for n in router_neighbors
+                ]
+                link_quality = _link_quality_from_margin(max(margins))
             else:
                 # No diagnostics for this router -> link quality is unknown
                 link_quality = None
@@ -904,6 +958,30 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "lq_in": _first(rd, "linkQualityIn", default=0),
                         "cost": _first(rd, "routeCost", default=0),
                     })
+
+            # Supplement with the MAC neighbour table so routers whose route TLV
+            # is absent (or which the route table omits) still show their links
+            # instead of rendering as isolated. routerNeighbors only reports the
+            # inbound link (margin measured locally), so use it for both
+            # directions; the reciprocal router fills in the rest.
+            covered = {c["router_id"] for c in connections}
+            for neighbor in router_neighbors:
+                n_rloc = _parse_rloc16(_first(neighbor, "rloc16", default=None))
+                if n_rloc is None:
+                    continue
+                n_rid = n_rloc >> 10
+                if n_rid == router_id or n_rid in covered:
+                    continue
+                lq = _link_quality_from_margin(
+                    _first(neighbor, "linkMargin", default=0)
+                )
+                connections.append({
+                    "router_id": n_rid,
+                    "lq_out": lq,
+                    "lq_in": lq,
+                    "cost": 0,
+                })
+                covered.add(n_rid)
 
             nodes[ext_address] = {
                 "ext_address": ext_address,

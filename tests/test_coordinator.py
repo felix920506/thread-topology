@@ -183,6 +183,78 @@ class TestProcessTopology:
         # leader is routerId 7; connections are to 15 and 61, never itself
         assert router_ids == {15, 61}
 
+    def test_router_with_only_neighbors_is_not_isolated(
+        self, mock_otbr_node_response
+    ):
+        """A router whose only diagnostic data is routerNeighbors still links up.
+
+        Mirrors live router 0x2400: its freshest snapshot has no route TLV (and
+        the other routers' route tables omit it), so the route table yields zero
+        connections. The routerNeighbors MAC table must be used as a fallback so
+        it isn't drawn as isolated.
+        """
+        coordinator = _build_coordinator()
+        node_attrs = ThreadTopologyCoordinator._resource_attributes(
+            mock_otbr_node_response
+        )
+        diagnostics = [
+            {
+                "attributes": {
+                    "extAddress": "3ECD5E8D98957D8A",
+                    "rloc16": "0x2400",  # routerId 9
+                    "routerId": 9,
+                    # No route TLV; only the MAC neighbour table.
+                    "routerNeighbors": [
+                        {"rloc16": "0x1c00", "linkMargin": 10},  # -> LQ 2
+                        {"rloc16": "0xf400", "linkMargin": 25},  # -> LQ 3
+                    ],
+                }
+            }
+        ]
+        topo = coordinator._process_topology(node_attrs, diagnostics, [], [])
+        node = topo["nodes"]["3ECD5E8D98957D8A"]
+        conns = {c["router_id"]: c for c in node["connections"]}
+        assert set(conns) == {7, 61}  # 0x1c00 -> rid 7, 0xf400 -> rid 61
+        assert conns[7]["lq_in"] == 2
+        assert conns[61]["lq_in"] == 3
+        # link quality is derived from the best neighbour margin, not Unknown
+        assert node["link_quality"] == 3
+
+    def test_richest_snapshot_wins_over_freshest(self, mock_otbr_node_response):
+        """A degraded later snapshot must not shadow an earlier complete one.
+
+        The OTBR diagnostics collection accumulates many snapshots per router; a
+        router's most recent one can be empty (no route, no neighbours). De-dup
+        must keep the richest snapshot, not the last one.
+        """
+        coordinator = _build_coordinator()
+        node_attrs = ThreadTopologyCoordinator._resource_attributes(
+            mock_otbr_node_response
+        )
+        diagnostics = [
+            {
+                "attributes": {
+                    "extAddress": "3ECD5E8D98957D8A",
+                    "rloc16": "0x2400",
+                    "routerId": 9,
+                    "routerNeighbors": [{"rloc16": "0xf400", "linkMargin": 25}],
+                }
+            },
+            {
+                # A newer but degraded snapshot for the same router.
+                "attributes": {
+                    "extAddress": "3ECD5E8D98957D8A",
+                    "rloc16": "0x2400",
+                    "routerId": 9,
+                    "routerNeighbors": [],
+                }
+            },
+        ]
+        topo = coordinator._process_topology(node_attrs, diagnostics, [], [])
+        node = topo["nodes"]["3ECD5E8D98957D8A"]
+        # The richer snapshot's neighbour (0xf400 -> rid 61) survives.
+        assert {c["router_id"] for c in node["connections"]} == {61}
+
     def test_child_rloc16_computed(self, topology):
         # child rloc16 = parent rloc16 (0x1c00) with child id in low bits
         leader = topology["nodes"][LEADER]
