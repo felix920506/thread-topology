@@ -160,6 +160,27 @@ def _link_quality_from_margin(margin: Any) -> int:
     return 0
 
 
+def _ext_to_hex(value: Any) -> str | None:
+    """Normalize a Matter extended address to a 16-char lowercase hex string.
+
+    ``ThreadNetworkDiagnostics.ExtAddress`` is a uint64, while a
+    ``GeneralDiagnostics`` hardware address is an 8-byte octet string; accept
+    either (and the already-hex string form) and reject anything that isn't a
+    full 64-bit address.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return f"{value:016x}" if value > 0 else None
+    if isinstance(value, (bytes, bytearray)):
+        b = bytes(value)
+        return b.hex() if len(b) == 8 else None
+    if isinstance(value, str):
+        norm = _normalize_address(value)
+        return norm.lower() if len(norm) == 16 else None
+    return None
+
+
 class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator to fetch Thread topology data from OTBR."""
 
@@ -557,6 +578,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "identifiers": list(device.identifiers),
                         "transport": None,
                         "ext_address": None,
+                        "ext_addresses": [],
                     }
 
                     # Enrich with Thread address/role from the Matter node
@@ -580,12 +602,23 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return matter_devices
 
     def _enrich_matter_device(self, device: Any, entry: dict[str, Any]) -> None:
-        """Best-effort: read the Thread extended address + transport for a device.
+        """Best-effort: read the Thread extended address(es) + transport.
 
-        Uses the Matter integration's client: ``GeneralDiagnostics`` network
-        interfaces give the hardware address (= Thread extended address, the
-        join key to OTBR) and the interface type (Thread vs WiFi). Wrapped in
-        broad guards because this reaches into another integration.
+        Collects every extended address a device might present so it can be
+        matched to its OTBR entry regardless of which one OTBR reports:
+
+        - ``ThreadNetworkDiagnostics.ExtAddress`` is the *operational* extended
+          address the device actually uses in the mesh. Devices that randomise
+          their extended address (rather than deriving it from the factory
+          EUI-64) report this value to OTBR, so it is the reliable join key and
+          is preferred for display.
+        - ``GeneralDiagnostics.NetworkInterfaces[].hardwareAddress`` is the
+          factory hardware address; kept as a secondary key for devices that use
+          it directly as their Thread address.
+
+        ``entry["ext_addresses"]`` holds all candidates (the matcher tries each);
+        ``entry["ext_address"]`` is the preferred one. Wrapped in broad guards
+        because this reaches into another integration.
         """
         try:
             from homeassistant.components.matter.helpers import (
@@ -602,7 +635,28 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if node is None:
             return
 
-        # GeneralDiagnostics network interfaces -> Thread ext address + transport
+        candidates: list[str] = []
+
+        def _add(addr: str | None) -> None:
+            if addr and addr not in candidates:
+                candidates.append(addr)
+
+        # ThreadNetworkDiagnostics.ExtAddress -> operational extended address
+        # (the value OTBR reports). Preferred, so collected first.
+        try:
+            op_ext = node.get_attribute_value(
+                0,
+                clusters.ThreadNetworkDiagnostics,
+                clusters.ThreadNetworkDiagnostics.Attributes.ExtAddress,
+            )
+        except Exception:  # noqa: BLE001
+            op_ext = None
+        op_hex = _ext_to_hex(op_ext)
+        if op_hex:
+            _add(op_hex)
+            entry["transport"] = "thread"
+
+        # GeneralDiagnostics network interfaces -> hardware address + transport
         try:
             interfaces = node.get_attribute_value(
                 0,
@@ -620,11 +674,15 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             hw_bytes = bytes(hw) if hw else b""
             # Thread interface type is 4; a Thread MAC is an 8-byte EUI-64
             if itype == 4 or len(hw_bytes) == 8:
-                entry["ext_address"] = hw_bytes.hex()
+                _add(hw_bytes.hex())
                 entry["transport"] = "thread"
                 break
             if itype in (1, 2):  # WiFi / Ethernet
                 entry["transport"] = "wifi"
+
+        if candidates:
+            entry["ext_addresses"] = candidates
+            entry["ext_address"] = candidates[0]
 
     def _get_thread_border_routers(self) -> list[dict[str, Any]]:
         """Get Thread Border Routers from Home Assistant device registry."""
@@ -777,13 +835,17 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         wifi_matter = [d for d in matter_devices if d["transport"] == "wifi"]
 
         # Map to name Thread devices from Home Assistant Matter data, keyed by
-        # extended address (the "MAC" on the device's Matter info panel). The
-        # same key names both routers and children.
+        # extended address (the "MAC" on the device's Matter info panel). A device
+        # may present more than one candidate address (operational vs hardware),
+        # so index every candidate; the same keys name both routers and children.
         matter_by_ext: dict[str, str] = {}
         for d in matter_devices:
-            ext = d.get("ext_address")
-            if ext:
-                matter_by_ext[_normalize_address(ext)] = d["name"]
+            exts = d.get("ext_addresses") or (
+                [d["ext_address"]] if d.get("ext_address") else []
+            )
+            for ext in exts:
+                if ext:
+                    matter_by_ext[_normalize_address(ext)] = d["name"]
 
         # Index diagnostics by normalized extended address, and build the router
         # set from the live diagnostics entries only. The collection holds many
@@ -1028,16 +1090,24 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         through the OTBR ``/api/diagnostics`` REST API.
         """
         # Thread side: routers + children that carry an extended address.
+        # ``identified_routers`` are routers already named by vendor/OUI/custom
+        # data (e.g. border routers) — they aren't Matter devices and aren't the
+        # "unidentified" case, so they're tracked (to keep the reverse direction
+        # correct) but excluded from the gap list.
         thread_by_ext: dict[str, str] = {}
+        identified_routers: set[str] = set()
         children_without_ext: list[str] = []
         for node in nodes.values():
             r_ext_raw = node.get("ext_address", "")
             r_ext = _normalize_address(r_ext_raw)
+            name = node.get("name", "") or ""
             if r_ext:
                 thread_by_ext[r_ext] = (
                     f"{r_ext_raw} (router, rloc16 0x{node.get('rloc16', 0):04x}, "
-                    f"role {node.get('role')}, shown as '{node.get('name')}')"
+                    f"role {node.get('role')}, shown as '{name}')"
                 )
+                if not name.startswith("Thread Router ("):
+                    identified_routers.add(r_ext)
             for child in node.get("children", []):
                 c_ext_raw = child.get("ext_address", "")
                 c_ext = _normalize_address(c_ext_raw)
@@ -1051,25 +1121,35 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else:
                     children_without_ext.append(where)
 
-        # Home Assistant side: Matter-over-Thread devices.
-        ha_by_ext: dict[str, str] = {}
+        # Home Assistant side: Matter-over-Thread devices. A device may present
+        # several candidate addresses (operational vs hardware); it matches the
+        # mesh if any candidate is present, and all candidates are shown so a true
+        # mismatch can be debugged against OTBR.
+        ha_addrs: list[tuple[str, list[str]]] = []  # (name, normalized candidates)
         ha_without_ext: list[str] = []
         for device in thread_matter:
-            ext_raw = device.get("ext_address")
             name = device.get("name", "Unknown")
-            if ext_raw:
-                ha_by_ext[_normalize_address(ext_raw)] = name
+            exts = device.get("ext_addresses") or (
+                [device["ext_address"]] if device.get("ext_address") else []
+            )
+            cands = [_normalize_address(e) for e in exts if e]
+            if cands:
+                ha_addrs.append((name, cands))
             else:
                 ha_without_ext.append(name)
 
+        ha_by_ext: dict[str, str] = {
+            ext: name for name, cands in ha_addrs for ext in cands
+        }
+
         thread_only = [
             desc for ext, desc in sorted(thread_by_ext.items())
-            if ext not in ha_by_ext
+            if ext not in ha_by_ext and ext not in identified_routers
         ]
         ha_only = [
-            f"{name} (extAddress {ext})"
-            for ext, name in sorted(ha_by_ext.items())
-            if ext not in thread_by_ext
+            f"{name} (extAddress {'/'.join(cands)})"
+            for name, cands in sorted(ha_addrs)
+            if not any(ext in thread_by_ext for ext in cands)
         ]
 
         if not (thread_only or ha_only or children_without_ext or ha_without_ext):

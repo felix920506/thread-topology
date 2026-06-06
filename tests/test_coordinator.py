@@ -308,6 +308,48 @@ class TestProcessTopology:
         # ...but connectivity still falls back to the older route table.
         assert {c["router_id"] for c in node["connections"]} == {61}
 
+    def test_child_matched_by_operational_ext_address(
+        self, mock_otbr_node_response
+    ):
+        """A device is matched on any candidate address, not just the first.
+
+        Devices that randomise their Thread extended address present the mesh a
+        different address than their factory hardware address. Home Assistant
+        exposes both (``ext_addresses``); the mesh child must still be named when
+        only the operational (non-first) candidate matches.
+        """
+        coordinator = _build_coordinator()
+        node_attrs = ThreadTopologyCoordinator._resource_attributes(
+            mock_otbr_node_response
+        )
+        diagnostics = [
+            {
+                "attributes": {
+                    "extAddress": "7690F04AB3B4E9DA",
+                    "rloc16": "0x3c00",
+                    "routerId": 15,
+                    "children": [
+                        {"childId": 1, "rloc16": "0x3c01", "rxOnWhenIdle": False,
+                         # Operational (randomised) extAddress seen by OTBR.
+                         "extAddress": "0BADCAFE00000001"},
+                    ],
+                }
+            }
+        ]
+        matter = [
+            {
+                "name": "Roaming Sensor",
+                "transport": "thread",
+                # Hardware address (factory) differs from the operational one;
+                # both are offered as candidates.
+                "ext_address": "FACTORY000000001",
+                "ext_addresses": ["FACTORY000000001", "0badcafe00000001"],
+            }
+        ]
+        topo = coordinator._process_topology(node_attrs, diagnostics, matter, [])
+        child = topo["nodes"]["7690F04AB3B4E9DA"]["children"][0]
+        assert child.get("name") == "Roaming Sensor"
+
     def test_child_rloc16_computed(self, topology):
         # child rloc16 = parent rloc16 (0x1c00) with child id in low bits
         leader = topology["nodes"][LEADER]
