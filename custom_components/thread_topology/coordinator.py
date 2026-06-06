@@ -38,6 +38,12 @@ _LOGGER = logging.getLogger(__name__)
 
 CUSTOM_ROUTERS_FILE = "custom_routers.yaml"
 
+# Per-device timeout for the live ThreadNetworkDiagnostics.ExtAddress read. A
+# sleepy end device only answers when it next polls its parent, so allow a few
+# poll cycles; reads run concurrently so this bounds a whole refresh, not each
+# device.
+LIVE_READ_TIMEOUT = 10
+
 # Known Thread Border Router OUI prefixes (first 6 chars of extended address)
 # These are based on IEEE OUI database and known devices
 KNOWN_BORDER_ROUTER_OUIS = {
@@ -201,6 +207,10 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._session: aiohttp.ClientSession | None = None
         self._router_index = 0  # Track router numbering
         self._custom_routers: list[dict[str, str]] = self._load_custom_routers()
+        # Operational extended addresses discovered via live Matter reads, keyed
+        # by Matter node id. Sleepy devices randomise this value and HA never
+        # caches it, so we read it once and remember it across polls.
+        self._op_ext_cache: dict[int, str] = {}
 
     def _load_custom_routers(self) -> list[dict[str, str]]:
         """Load user-defined border routers from custom_routers.yaml."""
@@ -273,7 +283,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             diagnostics = await self._fetch_diagnostics(node_attrs)
 
             # Get Matter devices and Thread Border Routers from HA device registry
-            matter_devices = self._get_matter_devices()
+            matter_devices = await self._get_matter_devices()
             thread_routers = self._get_thread_border_routers()
 
             # 4. Process and combine data
@@ -543,7 +553,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         attributes = resource.get("attributes")
         return attributes if isinstance(attributes, dict) else resource
 
-    def _get_matter_devices(self) -> list[dict[str, Any]]:
+    async def _get_matter_devices(self) -> list[dict[str, Any]]:
         """Get Matter devices from Home Assistant, enriched with Thread address.
 
         The device registry only stores the Matter node id + name, so the Thread
@@ -552,16 +562,19 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         device page's "Matter info" panel). All of that is best-effort: if the
         Matter integration isn't present or its internals change, devices simply
         come back without an address and the topology falls back to neutral names.
+
+        Enrichment is awaited because sleepy end devices need a *live* read of
+        their operational extended address (see ``_enrich_matter_device``); the
+        per-device reads run concurrently so a refresh is bounded by the slowest
+        device, not their sum.
         """
         device_registry = dr.async_get(self.hass)
-        matter_devices = []
+        pending: list[tuple[Any, dict[str, Any]]] = []
 
         for device in device_registry.devices.values():
             # Check if device has matter identifier
             for identifier in device.identifiers:
                 if identifier[0] == "matter":
-                    model = (device.model or "").lower()
-                    manufacturer = (device.manufacturer or "").lower()
                     # Prefer the user-assigned name (what's shown in the HA UI);
                     # device.name is the integration default (usually the model),
                     # so 5 renamed "MYGGBETT" sensors stay distinguishable.
@@ -580,28 +593,35 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "ext_address": None,
                         "ext_addresses": [],
                     }
-
-                    # Enrich with Thread address/role from the Matter node
-                    self._enrich_matter_device(device, entry)
-
-                    # Fall back to a name/model heuristic if the Matter node did
-                    # not tell us the transport.
-                    if entry["transport"] is None:
-                        if "wifi" in model or "wifi" in name.lower() or manufacturer in (
-                            "nuki",
-                            "wemo",
-                            "lifx",
-                        ):
-                            entry["transport"] = "wifi"
-                        else:
-                            entry["transport"] = "thread"
-
-                    matter_devices.append(entry)
+                    pending.append((device, entry))
                     break
+
+        # Enrich with Thread address/role from each Matter node, concurrently.
+        await asyncio.gather(
+            *(self._enrich_matter_device(device, entry) for device, entry in pending)
+        )
+
+        matter_devices = []
+        for device, entry in pending:
+            # Fall back to a name/model heuristic if the Matter node did not
+            # tell us the transport.
+            if entry["transport"] is None:
+                model = (device.model or "").lower()
+                manufacturer = (device.manufacturer or "").lower()
+                name = entry["name"].lower()
+                if "wifi" in model or "wifi" in name or manufacturer in (
+                    "nuki",
+                    "wemo",
+                    "lifx",
+                ):
+                    entry["transport"] = "wifi"
+                else:
+                    entry["transport"] = "thread"
+            matter_devices.append(entry)
 
         return matter_devices
 
-    def _enrich_matter_device(self, device: Any, entry: dict[str, Any]) -> None:
+    async def _enrich_matter_device(self, device: Any, entry: dict[str, Any]) -> None:
         """Best-effort: read the Thread extended address(es) + transport.
 
         Collects every extended address a device might present so it can be
@@ -655,36 +675,9 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return
 
-        candidates: list[str] = []
-
-        def _add(addr: str | None) -> None:
-            if addr and addr not in candidates:
-                candidates.append(addr)
-
-        # ThreadNetworkDiagnostics.ExtAddress -> operational extended address
-        # (the value OTBR reports). Preferred, so collected first.
-        op_exc: str | None = None
-        try:
-            op_ext = node.get_attribute_value(
-                0,
-                clusters.ThreadNetworkDiagnostics,
-                clusters.ThreadNetworkDiagnostics.Attributes.ExtAddress,
-            )
-        except Exception as err:  # noqa: BLE001
-            op_ext = None
-            op_exc = f"{type(err).__name__}: {err}"
-        op_hex = _ext_to_hex(op_ext)
-        if op_hex:
-            _add(op_hex)
-            entry["transport"] = "thread"
-        _LOGGER.debug(
-            "Matter enrich %s: ThreadNetworkDiagnostics.ExtAddress raw=%r "
-            "(type=%s) -> hex=%s%s",
-            label, op_ext, type(op_ext).__name__, op_hex,
-            f" [read raised {op_exc}]" if op_exc else "",
-        )
-
-        # GeneralDiagnostics network interfaces -> hardware address + transport
+        # GeneralDiagnostics network interfaces -> hardware (factory) address +
+        # transport. Read first so we know whether the device is on Thread (and
+        # therefore worth a live ExtAddress read) before issuing one.
         ifaces_exc: str | None = None
         try:
             interfaces = node.get_attribute_value(
@@ -696,6 +689,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             interfaces = []
             ifaces_exc = f"{type(err).__name__}: {err}"
 
+        hw_hex: str | None = None
         iface_log: list[str] = []
         for iface in interfaces:
             hw = getattr(iface, "hardwareAddress", None)
@@ -710,7 +704,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
             # Thread interface type is 4; a Thread MAC is an 8-byte EUI-64
             if itype == 4 or len(hw_bytes) == 8:
-                _add(hw_bytes.hex())
+                hw_hex = hw_bytes.hex()
                 entry["transport"] = "thread"
                 break
             if itype in (1, 2):  # WiFi / Ethernet
@@ -721,6 +715,49 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             f" [read raised {ifaces_exc}]" if ifaces_exc else "",
         )
 
+        # ThreadNetworkDiagnostics.ExtAddress -> operational extended address
+        # (the value OTBR reports). This is the reliable join key for devices
+        # that randomise their address (sleepy end devices), so it is preferred.
+        # HA's attribute cache never populates it, so fall back to a remembered
+        # value and finally to a live read over the Matter client.
+        op_exc: str | None = None
+        try:
+            op_ext = node.get_attribute_value(
+                0,
+                clusters.ThreadNetworkDiagnostics,
+                clusters.ThreadNetworkDiagnostics.Attributes.ExtAddress,
+            )
+        except Exception as err:  # noqa: BLE001
+            op_ext = None
+            op_exc = f"{type(err).__name__}: {err}"
+        op_hex = _ext_to_hex(op_ext)
+        _LOGGER.debug(
+            "Matter enrich %s: ThreadNetworkDiagnostics.ExtAddress (cached) "
+            "raw=%r (type=%s) -> hex=%s%s",
+            label, op_ext, type(op_ext).__name__, op_hex,
+            f" [read raised {op_exc}]" if op_exc else "",
+        )
+
+        if not op_hex and entry.get("transport") == "thread":
+            op_hex = self._op_ext_cache.get(node.node_id)
+            if op_hex:
+                _LOGGER.debug(
+                    "Matter enrich %s: using remembered operational ExtAddress %s",
+                    label, op_hex,
+                )
+            else:
+                op_hex = await self._live_read_op_ext(node, clusters, label)
+                if op_hex:
+                    self._op_ext_cache[node.node_id] = op_hex
+
+        # Assemble candidates with the operational address preferred (first), so
+        # it becomes ``ext_address`` for display while the factory address stays
+        # available as a fallback match.
+        candidates = [c for c in (op_hex, hw_hex) if c]
+        # Dedupe while preserving order (op and hw are equal for non-randomising
+        # devices).
+        candidates = list(dict.fromkeys(candidates))
+
         if candidates:
             entry["ext_addresses"] = candidates
             entry["ext_address"] = candidates[0]
@@ -730,6 +767,72 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             label, candidates or None, entry.get("transport"),
             entry.get("ext_address"),
         )
+
+    async def _live_read_op_ext(
+        self, node: Any, clusters: Any, label: str
+    ) -> str | None:
+        """Live-read ``ThreadNetworkDiagnostics.ExtAddress`` over the Matter client.
+
+        ``node.get_attribute_value`` only reads HA's local attribute cache, which
+        never contains ``ExtAddress``. A live read asks the device directly; a
+        sleepy end device answers when it next polls its parent, so this is
+        wrapped in a timeout and stays best-effort.
+        """
+        client = self._get_matter_client()
+        if client is None:
+            _LOGGER.debug(
+                "Matter enrich %s: no Matter client available for live read", label
+            )
+            return None
+
+        cluster_id = clusters.ThreadNetworkDiagnostics.id
+        attr_id = clusters.ThreadNetworkDiagnostics.Attributes.ExtAddress.attribute_id
+        attr_path = f"0/{cluster_id}/{attr_id}"
+        try:
+            async with asyncio.timeout(LIVE_READ_TIMEOUT):
+                result = await client.read_attribute(node.node_id, attr_path)
+        except Exception as err:  # noqa: BLE001 - device may be asleep/unreachable
+            _LOGGER.debug(
+                "Matter enrich %s: live ExtAddress read failed (%s: %s)",
+                label, type(err).__name__, err,
+            )
+            return None
+
+        # read_attribute returns {attribute_path: value}; older clients may
+        # return the value directly.
+        raw = result
+        if isinstance(result, dict):
+            raw = result.get(attr_path)
+            if raw is None and len(result) == 1:
+                raw = next(iter(result.values()))
+        op_hex = _ext_to_hex(raw)
+        _LOGGER.debug(
+            "Matter enrich %s: live ExtAddress read raw=%r (type=%s) -> hex=%s",
+            label, raw, type(raw).__name__, op_hex,
+        )
+        return op_hex
+
+    def _get_matter_client(self) -> Any | None:
+        """Locate the python-matter-server client from the Matter config entry.
+
+        The client lives on the Matter integration's runtime data (newer HA) or
+        under ``hass.data['matter']`` (older HA); try both and stay defensive
+        because this reaches into another integration's internals.
+        """
+        try:
+            entries = self.hass.config_entries.async_entries("matter")
+        except Exception:  # noqa: BLE001
+            return None
+        for entry in entries:
+            data = getattr(entry, "runtime_data", None)
+            client = getattr(getattr(data, "adapter", None), "matter_client", None)
+            if client is None:
+                domain_data = self.hass.data.get("matter", {})
+                slot = domain_data.get(entry.entry_id) if isinstance(domain_data, dict) else None
+                client = getattr(getattr(slot, "adapter", None), "matter_client", None)
+            if client is not None:
+                return client
+        return None
 
     def _get_thread_border_routers(self) -> list[dict[str, Any]]:
         """Get Thread Border Routers from Home Assistant device registry."""

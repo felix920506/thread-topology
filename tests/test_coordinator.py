@@ -1,8 +1,10 @@
 """Tests for Thread Topology coordinator."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 import pytest
 
@@ -92,7 +94,7 @@ class TestMatterDeviceNames:
         monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: reg)
         coord = _build_coordinator()
         coord.hass = MagicMock()  # not set by the fake coordinator base
-        return coord._get_matter_devices()
+        return asyncio.run(coord._get_matter_devices())
 
     def test_prefers_user_name(self, monkeypatch):
         dev = self._fake_device(name_by_user="Front Door")
@@ -101,6 +103,83 @@ class TestMatterDeviceNames:
     def test_falls_back_to_device_name(self, monkeypatch):
         dev = self._fake_device(name_by_user=None)
         assert self._devices(monkeypatch, dev)[0]["name"] == "MYGGBETT door/window sensor"
+
+
+class TestLiveReadOpExt:
+    """Live read of the operational ExtAddress for sleepy end devices."""
+
+    def _clusters(self):
+        return SimpleNamespace(
+            ThreadNetworkDiagnostics=SimpleNamespace(
+                id=53,
+                Attributes=SimpleNamespace(
+                    ExtAddress=SimpleNamespace(attribute_id=0)
+                ),
+            )
+        )
+
+    def _coord_with_client(self, monkeypatch, read_attribute):
+        coord = _build_coordinator()
+        coord.hass = MagicMock()
+        client = MagicMock()
+        client.read_attribute = read_attribute
+        monkeypatch.setattr(coord, "_get_matter_client", lambda: client)
+        return coord
+
+    def test_parses_dict_result(self, monkeypatch):
+        async def read_attribute(node_id, attr_path):
+            assert attr_path == "0/53/0"
+            return {"0/53/0": 0x0BADCAFE00000001}
+
+        coord = self._coord_with_client(monkeypatch, read_attribute)
+        node = SimpleNamespace(node_id=5)
+        result = asyncio.run(coord._live_read_op_ext(node, self._clusters(), "X"))
+        assert result == "0badcafe00000001"
+
+    def test_parses_scalar_result(self, monkeypatch):
+        async def read_attribute(node_id, attr_path):
+            return 0x0BADCAFE00000002
+
+        coord = self._coord_with_client(monkeypatch, read_attribute)
+        node = SimpleNamespace(node_id=5)
+        result = asyncio.run(coord._live_read_op_ext(node, self._clusters(), "X"))
+        assert result == "0badcafe00000002"
+
+    def test_no_client_returns_none(self, monkeypatch):
+        coord = _build_coordinator()
+        coord.hass = MagicMock()
+        monkeypatch.setattr(coord, "_get_matter_client", lambda: None)
+        node = SimpleNamespace(node_id=5)
+        assert asyncio.run(coord._live_read_op_ext(node, self._clusters(), "X")) is None
+
+    def test_read_failure_returns_none(self, monkeypatch):
+        async def read_attribute(node_id, attr_path):
+            raise RuntimeError("device asleep")
+
+        coord = self._coord_with_client(monkeypatch, read_attribute)
+        node = SimpleNamespace(node_id=5)
+        assert asyncio.run(coord._live_read_op_ext(node, self._clusters(), "X")) is None
+
+    def test_get_matter_client_from_runtime_data(self):
+        coord = _build_coordinator()
+        sentinel = object()
+        entry = SimpleNamespace(
+            entry_id="e1",
+            runtime_data=SimpleNamespace(
+                adapter=SimpleNamespace(matter_client=sentinel)
+            ),
+        )
+        hass = MagicMock()
+        hass.config_entries.async_entries.return_value = [entry]
+        coord.hass = hass
+        assert coord._get_matter_client() is sentinel
+
+    def test_get_matter_client_absent_returns_none(self):
+        coord = _build_coordinator()
+        hass = MagicMock()
+        hass.config_entries.async_entries.return_value = []
+        coord.hass = hass
+        assert coord._get_matter_client() is None
 
 
 class TestParseRloc16:
