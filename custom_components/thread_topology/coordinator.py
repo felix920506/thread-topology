@@ -619,20 +619,40 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ``entry["ext_addresses"]`` holds all candidates (the matcher tries each);
         ``entry["ext_address"]`` is the preferred one. Wrapped in broad guards
         because this reaches into another integration.
+
+        Emits a per-device DEBUG record of every raw value read (the operational
+        ``ExtAddress``, each network interface, and the derived candidates) so a
+        failed match can be traced to its cause — most often a sleepy end device
+        whose operational ``ExtAddress`` read times out, leaving only the factory
+        hardware address (which never appears on the mesh).
         """
+        label = entry.get("name", "Unknown")
         try:
             from homeassistant.components.matter.helpers import (
                 get_node_from_device_entry,
             )
             from chip.clusters import Objects as clusters
-        except Exception:  # noqa: BLE001 - matter/chip may be absent
+        except Exception as err:  # noqa: BLE001 - matter/chip may be absent
+            _LOGGER.debug(
+                "Matter enrich %s: matter/chip import failed (%s: %s)",
+                label, type(err).__name__, err,
+            )
             return
 
         try:
             node = get_node_from_device_entry(self.hass, device)
-        except Exception:  # noqa: BLE001 - internal API, stay defensive
+        except Exception as err:  # noqa: BLE001 - internal API, stay defensive
+            _LOGGER.debug(
+                "Matter enrich %s: get_node_from_device_entry raised (%s: %s)",
+                label, type(err).__name__, err,
+            )
             node = None
         if node is None:
+            _LOGGER.debug(
+                "Matter enrich %s: no Matter node found for device "
+                "(identifiers=%s) — cannot read any extended address",
+                label, entry.get("identifiers"),
+            )
             return
 
         candidates: list[str] = []
@@ -643,35 +663,51 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # ThreadNetworkDiagnostics.ExtAddress -> operational extended address
         # (the value OTBR reports). Preferred, so collected first.
+        op_exc: str | None = None
         try:
             op_ext = node.get_attribute_value(
                 0,
                 clusters.ThreadNetworkDiagnostics,
                 clusters.ThreadNetworkDiagnostics.Attributes.ExtAddress,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as err:  # noqa: BLE001
             op_ext = None
+            op_exc = f"{type(err).__name__}: {err}"
         op_hex = _ext_to_hex(op_ext)
         if op_hex:
             _add(op_hex)
             entry["transport"] = "thread"
+        _LOGGER.debug(
+            "Matter enrich %s: ThreadNetworkDiagnostics.ExtAddress raw=%r "
+            "(type=%s) -> hex=%s%s",
+            label, op_ext, type(op_ext).__name__, op_hex,
+            f" [read raised {op_exc}]" if op_exc else "",
+        )
 
         # GeneralDiagnostics network interfaces -> hardware address + transport
+        ifaces_exc: str | None = None
         try:
             interfaces = node.get_attribute_value(
                 0,
                 clusters.GeneralDiagnostics,
                 clusters.GeneralDiagnostics.Attributes.NetworkInterfaces,
             ) or []
-        except Exception:  # noqa: BLE001
+        except Exception as err:  # noqa: BLE001
             interfaces = []
+            ifaces_exc = f"{type(err).__name__}: {err}"
 
+        iface_log: list[str] = []
         for iface in interfaces:
             hw = getattr(iface, "hardwareAddress", None)
             itype = getattr(iface, "type", None)
-            if not getattr(iface, "isOperational", True):
-                continue
+            is_op = getattr(iface, "isOperational", True)
             hw_bytes = bytes(hw) if hw else b""
+            iface_log.append(
+                f"(name={getattr(iface, 'name', None)!r} type={itype} "
+                f"operational={is_op} hw={hw_bytes.hex() or None})"
+            )
+            if not is_op:
+                continue
             # Thread interface type is 4; a Thread MAC is an 8-byte EUI-64
             if itype == 4 or len(hw_bytes) == 8:
                 _add(hw_bytes.hex())
@@ -679,10 +715,21 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 break
             if itype in (1, 2):  # WiFi / Ethernet
                 entry["transport"] = "wifi"
+        _LOGGER.debug(
+            "Matter enrich %s: GeneralDiagnostics.NetworkInterfaces=%s%s",
+            label, ", ".join(iface_log) or "[]",
+            f" [read raised {ifaces_exc}]" if ifaces_exc else "",
+        )
 
         if candidates:
             entry["ext_addresses"] = candidates
             entry["ext_address"] = candidates[0]
+
+        _LOGGER.debug(
+            "Matter enrich %s: candidates=%s transport=%s (preferred=%s)",
+            label, candidates or None, entry.get("transport"),
+            entry.get("ext_address"),
+        )
 
     def _get_thread_border_routers(self) -> list[dict[str, Any]]:
         """Get Thread Border Routers from Home Assistant device registry."""
