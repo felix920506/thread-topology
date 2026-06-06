@@ -1281,7 +1281,14 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
           needed to chase them through the OTBR ``/api/diagnostics`` REST API), and
         - HA Matter/Thread devices that matched nothing on the mesh (with the
           extAddress *and* rloc16 used as join keys).
+
+        Skipped entirely when the mesh has no nodes: the OTBR diagnostics task
+        queue hasn't returned yet (e.g. the first poll after a restart), so every
+        HA device would be spuriously flagged as "not on the mesh".
         """
+        if not nodes:
+            return
+
         thread_only: list[str] = []
         for node in nodes.values():
             name = node.get("name", "") or ""

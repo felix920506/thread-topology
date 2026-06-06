@@ -638,6 +638,18 @@ class TestIdentificationGaps:
         exts = {c["ext_address"] for c in children}
         assert exts == {"AAAA000000000002"}  # newest snapshot, not the stale one
 
+    def test_no_warning_when_mesh_empty(self, caplog):
+        coordinator = _build_coordinator()
+        # No diagnostics yet (e.g. first poll after restart): every HA device
+        # would otherwise be spuriously flagged as not on the mesh.
+        matter = [
+            {"name": "Some Sensor", "transport": "thread",
+             "ext_address": "deadbeef00000009"},
+        ]
+        with caplog.at_level(logging.WARNING):
+            coordinator._process_topology(self.NODE, [], matter, [])
+        assert "identification gaps" not in caplog.text
+
     def test_no_warning_when_everything_matches(self, caplog):
         coordinator = _build_coordinator()
         # The router and its child both match a Home Assistant Matter device.
