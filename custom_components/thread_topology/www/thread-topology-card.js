@@ -25,6 +25,7 @@ const VIS_URL = "/thread_topology/vis-network.min.js";
 const ROUTER_COLORS = {
   leader: "#e74c3c", // red
   otbr: "#4a90e2", // blue
+  border_router: "#9b59b6", // purple
   router: "#f5a623", // amber
 };
 const CHILD_COLORS = {
@@ -136,6 +137,7 @@ class ThreadTopologyCard extends HTMLElement {
         <div class="legend">
           <span><span class="dot" style="background:${ROUTER_COLORS.leader}"></span>Leader</span>
           <span><span class="dot" style="background:${ROUTER_COLORS.otbr}"></span>Connected OTBR</span>
+          <span><span class="dot" style="background:${ROUTER_COLORS.border_router}"></span>Border Router</span>
           <span><span class="dot" style="background:${ROUTER_COLORS.router}"></span>Router</span>
           <span><span class="dot" style="background:${CHILD_COLORS.sleepy}"></span>Sleepy child</span>
           <span><span class="bar" style="background:${LQ_COLORS[3]}"></span>LQ 3 → 0<span class="bar" style="background:${LQ_COLORS[0]}"></span></span>
@@ -168,10 +170,25 @@ class ThreadTopologyCard extends HTMLElement {
 
     for (const [ext, n] of Object.entries(nodes)) {
       const rloc = n.rloc16 || 0;
-      const role = n.role === "leader" ? "leader" : n.is_otbr ? "otbr" : "router";
+      // Colour priority: leader, then the connected OTBR, then any other border
+      // router, else a plain mesh router.
+      const role = n.role === "leader"
+        ? "leader"
+        : n.is_otbr
+        ? "otbr"
+        : n.is_border_router
+        ? "border_router"
+        : "router";
       const color = ROUTER_COLORS[role];
       const crown = n.role === "leader" ? "👑 " : "";
-      const globe = n.is_otbr ? " 🌐" : "";
+      // A border router (including the connected OTBR) bridges Thread to other
+      // networks — mark it with a globe.
+      const globe = n.is_border_router || n.is_otbr ? " 🌐" : "";
+      // Role text composes leader + border router, matching the ASCII tree.
+      const roleParts = [];
+      if (n.role === "leader") roleParts.push("Leader");
+      if (n.is_border_router || n.is_otbr) roleParts.push("Border Router");
+      const roleText = roleParts.length ? roleParts.join(" · ") : "Router";
       const lqTxt = ["Poor", "Fair", "Good", "Excellent"];
       const lq = n.link_quality;
       visNodes.push({
@@ -182,9 +199,9 @@ class ThreadTopologyCard extends HTMLElement {
         color: { background: color, border: "#ffffff", highlight: { background: color, border: "#ffffff" } },
         borderWidth: 2,
         font: { color: this._textColor, size: 14, multi: false, vadjust: 0 },
-        title: `${n.name || rlocHex(rloc)} (${rlocHex(rloc)})\nRole: ${
-          n.role === "leader" ? "Leader" : "Router"
-        }${n.is_otbr ? " · connected OTBR" : ""}\nLink quality: ${
+        title: `${n.name || rlocHex(rloc)} (${rlocHex(rloc)})\nRole: ${roleText}${
+          n.is_otbr ? " (connected OTBR)" : ""
+        }\nLink quality: ${
           typeof lq === "number" ? lqTxt[Math.min(lq, 3)] : "Unknown"
         }`,
         _kind: "router",
@@ -268,7 +285,7 @@ class ThreadTopologyCard extends HTMLElement {
     // Only rebuild the graph data when the topology actually changed.
     const signature = JSON.stringify(
       Object.entries(nodes).map(([e, n]) => [
-        e, n.rloc16, n.role, n.is_otbr, n.link_quality,
+        e, n.rloc16, n.role, n.is_border_router, n.is_otbr, n.link_quality,
         (n.children || []).map((c) => [c.rloc16, c.name, c.type]),
         (n.connections || []).map((c) => [c.router_id, c.lq_out, c.lq_in, c.cost]),
       ])

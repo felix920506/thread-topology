@@ -1070,6 +1070,12 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 leader_ext_address = ext_address
             role = "leader" if is_leader else "router"
 
+            # A border router bridges Thread to other networks (it registers a
+            # prefix/route in the Thread network data). OTBR reports this per
+            # router as a top-level ``isBorderRouter`` flag, orthogonal to the
+            # leader/router role — a border router may or may not be the leader.
+            is_border_router = _is_truthy(diag.get("isBorderRouter"))
+
             # The node behind /api/node is the border router this integration is
             # connected to. It is NOT necessarily the Home Assistant radio (the
             # HA OTBR build doesn't expose the full /api/* diagnostics, so a
@@ -1230,6 +1236,7 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "ext_address": ext_address,
                 "rloc16": rloc_int,
                 "role": role,
+                "is_border_router": is_border_router,
                 "is_otbr": is_queried_otbr,
                 "name": router_info["name"],
                 "manufacturer": router_info["manufacturer"],
@@ -1381,13 +1388,28 @@ class ThreadTopologyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         for ext, node in ordered:
-            role = node.get("role", "router")
-            emoji = "\U0001f451" if role == "leader" else "\U0001f4e1"
-            role_label = "Leader" if role == "leader" else "Router"
+            is_leader = node.get("role", "router") == "leader"
+            is_br = node.get("is_border_router", False)
+            # Emoji: the leader crown takes precedence, then the border-router
+            # globe, else a plain mesh-router dish.
+            if is_leader:
+                emoji = "\U0001f451"  # 👑
+            elif is_br:
+                emoji = "\U0001f310"  # 🌐
+            else:
+                emoji = "\U0001f4e1"  # 📡
+            # Role label composes leader + border-router; a node that is neither
+            # is just a mesh "Router".
+            role_parts = []
+            if is_leader:
+                role_parts.append("Leader")
+            if is_br:
+                role_parts.append("Border Router")
+            role_label = " · ".join(role_parts) if role_parts else "Router"
             lq_value = node.get("link_quality")
             lq = lq_text[min(lq_value, 3)] if isinstance(lq_value, int) else "Unknown"
-            # Mark the border router this integration is connected to
-            otbr_tag = "  ·  \U0001f310 connected OTBR" if node.get("is_otbr") else ""
+            # Mark the specific border router this integration is connected to
+            otbr_tag = "  ·  \U0001f4cd connected OTBR" if node.get("is_otbr") else ""
             # Always show the 4-digit hex node number (rloc16), even for routers
             # already named from Home Assistant.
             rloc_hex = f"0x{node.get('rloc16', 0):04x}"

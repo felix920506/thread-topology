@@ -200,6 +200,24 @@ class TestProcessTopology:
         assert topology["nodes"][ROUTER_A]["role"] == "router"
         assert topology["nodes"][ROUTER_B]["role"] == "router"
 
+    def test_border_router_flag(self, topology):
+        # OTBR's per-router isBorderRouter flag is surfaced on each node,
+        # orthogonal to the leader/router role.
+        assert topology["nodes"][ROUTER_A]["is_border_router"] is True
+        assert topology["nodes"][ROUTER_B]["is_border_router"] is True
+        # The leader here is a plain (non-border) router.
+        assert topology["nodes"][LEADER]["is_border_router"] is False
+
+    def test_tree_differentiates_border_routers(self, topology):
+        tree = _build_coordinator().generate_tree(topology)
+        # A border router that isn't the leader is labelled "Border Router".
+        assert "Border Router" in tree
+        # The leader (a non-border router) is not mislabelled.
+        leader_line = next(
+            line for line in tree.splitlines() if "\U0001f451" in line
+        )
+        assert "Border Router" not in leader_line
+
     def test_link_quality_derived_from_route(self, topology):
         # No connectivity TLV -> derived from best inbound neighbour link (3)
         for node in topology["nodes"].values():
@@ -472,7 +490,7 @@ class TestProcessTopology:
         assert tree.rstrip().endswith("```")
         assert "MyHome1038137341" in tree
         assert "👑" in tree  # leader
-        assert "📡" in tree  # router
+        assert "🌐" in tree  # border router (both non-leader routers here)
         assert "└─" in tree  # child branch
         # 4-digit hex node number (rloc16) shown for every node, even named ones
         assert "0x3c00" in tree  # leader rloc16

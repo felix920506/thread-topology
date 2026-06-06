@@ -149,6 +149,8 @@ class ThreadNodeSensor(CoordinatorEntity[ThreadTopologyCoordinator], SensorEntit
         role = node_data.get("role", "unknown")
         if role == "leader":
             self._attr_icon = "mdi:crown"
+        elif node_data.get("is_border_router"):
+            self._attr_icon = "mdi:router-network"
         elif role == "router":
             self._attr_icon = "mdi:router-wireless"
         else:
@@ -193,6 +195,7 @@ class ThreadNodeSensor(CoordinatorEntity[ThreadTopologyCoordinator], SensorEntit
             "ext_address": self._ext_address,
             "rloc16": hex(node.get("rloc16", 0)),
             "role": node.get("role", "unknown"),
+            "is_border_router": node.get("is_border_router", False),
             "name": node.get("name", "Unknown"),
             "manufacturer": node.get("manufacturer", ""),
             "child_count": node.get("child_count", 0),
